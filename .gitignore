@@ -1,0 +1,23 @@
+# 環境變數（含敏感金鑰）
+.env
+.env.local
+.env.*.local
+
+# 依賴目錄
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 建置輸出
+dist/
+build/
+.next/
+*.egg-info/
+
+# 日誌與暫存
+*.log
+.DS_Store
+Thumbs.db

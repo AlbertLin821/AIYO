@@ -1,0 +1,33 @@
+# AIYO 愛遊 - 影片索引器依賴
+# Python 3.10+
+
+# YouTube API
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+
+# 影片下載（取得音訊給 Whisper）
+yt-dlp>=2024.1.0
+
+# 語音轉文字
+openai-whisper>=20231117
+# 若使用 OpenAI Whisper API 而非本地：openai>=1.0.0
+
+# Embedding 與語意分段
+sentence-transformers>=2.2.2
+torch>=2.0.0
+
+# 資料庫
+psycopg2-binary>=2.9.9
+pgvector>=0.2.4
+
+# 中文斷詞
+jieba>=0.42.1
+
+# 景點抽取（NER 可選，LLM 抽取用）
+# 使用 Ollama：httpx 或 requests
+httpx>=0.25.0
+
+# 通用工具
+python-dotenv>=1.0.0
+pydantic>=2.5.0
