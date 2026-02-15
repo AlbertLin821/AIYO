@@ -22,8 +22,8 @@ CREATE TABLE IF NOT EXISTS segments (
   video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE,
   start_sec INTEGER NOT NULL,
   end_sec INTEGER NOT NULL,
-  transcript TEXT,
   summary TEXT,
+  tags JSONB,
   city VARCHAR(100),
   embedding_vector vector(384),
   created_at TIMESTAMP DEFAULT NOW()
@@ -56,3 +56,12 @@ CREATE INDEX IF NOT EXISTS idx_places_name ON places(name);
 CREATE INDEX IF NOT EXISTS idx_places_city ON places(city);
 CREATE INDEX IF NOT EXISTS idx_segment_places_segment_id ON segment_places(segment_id);
 CREATE INDEX IF NOT EXISTS idx_segment_places_place_id ON segment_places(place_id);
+
+-- 向量索引（與 init-db.sql 一致；pgvector HNSW 較適合資料持續變動的情境）
+CREATE INDEX IF NOT EXISTS idx_segments_embedding ON segments
+  USING hnsw (embedding_vector vector_cosine_ops)
+  WHERE embedding_vector IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_places_embedding ON places
+  USING hnsw (embedding_vector vector_cosine_ops)
+  WHERE embedding_vector IS NOT NULL;
