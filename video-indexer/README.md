@@ -31,6 +31,28 @@ pip install -r requirements.txt
 - `DATABASE_URL`
 - `YOUTUBE_API_KEY`
 
+索引流程（index_video）額外需要：
+- `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（景點抽取，預設 localhost:11434、qwen2.5:7b-instruct）
+
+## 系統需求
+
+- **FFmpeg**：使用 Whisper 轉錄無字幕影片時，yt-dlp 需 FFmpeg 擷取音訊。請預先安裝。
+
 ## 使用方式
 
-（待實作腳本後補齊）
+### 1. YouTube 影片搜尋與寫入
+
+詳見 [scripts/README.md](./scripts/README.md)。快速開始：
+
+```bash
+cd video-indexer
+python -m venv .venv
+.venv\Scripts\Activate.ps1   # Windows
+pip install google-api-python-client python-dotenv psycopg2-binary
+
+# 測試（需已設定 YOUTUBE_API_KEY）
+python scripts/search_youtube.py --dry-run
+
+# 正式執行，寫入資料庫
+python scripts/search_youtube.py
+```

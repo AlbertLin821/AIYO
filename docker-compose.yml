@@ -9,6 +9,13 @@ services:
     restart: unless-stopped
     networks:
       - aiyo-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -31,6 +38,23 @@ services:
       timeout: 5s
       retries: 5
 
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: aiyo-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    restart: unless-stopped
+    networks:
+      - aiyo-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   redis:
     image: redis:7-alpine
     container_name: aiyo-redis
@@ -50,6 +74,7 @@ services:
 volumes:
   ollama_data:
   postgres_data:
+  pgadmin_data:
   redis_data:
 
 networks:

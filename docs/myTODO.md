@@ -2,8 +2,8 @@
 
 依 [開發路線圖.md](./開發路線圖.md) 與專案規格整理之整體待辦，供團隊追蹤進度。
 
-**文件版本**：2.0  
-**更新日期**：2026-02-15
+**文件版本**：2.1  
+**更新日期**：2026-02-21
 
 ---
 
@@ -49,15 +49,15 @@
 
 ### Docker 環境
 
-- [ ] 啟動 `docker compose up -d`
-- [ ] 確認 PostgreSQL、Redis、Ollama 正常運行
-- [ ] 確認 Ollama 已下載所需模型（如 `qwen3:8b`）
+- [x] 啟動 `docker compose up -d`
+- [x] 確認 PostgreSQL、Redis、Ollama 正常運行
+- [ ] 確認 Ollama 已下載所需模型（如 `qwen2.5:7b-instruct`、`qwen3:8b`）
 
 ### 開發環境建置
 
-- [ ] video-indexer：建立 `.venv`、`pip install -r requirements.txt`
+- [x] video-indexer：建立 `.venv`、`pip install -r requirements.txt`
 - [ ] ai-service：建立 `.venv`、安裝依賴
-- [ ] frontend：`npm install`（專案建立後）
+- [x] frontend：專案已建立，`npm install` 完成
 - [ ] api-gateway：`npm install`（專案建立後）
 
 ### 參考文件
@@ -75,59 +75,58 @@
 
 ### 1. YouTube API 整合
 
-- [ ] 實作 `search.list` 搜尋影片（關鍵字：台灣旅遊、台南兩天一夜等；建議 maxResults=50 以節省配額）
-- [ ] 取得影片 metadata 並寫入 `videos` 表
-- [ ] 實作字幕取得，需在以下兩者中擇一並了解 trade-off：
-  - **captions.list + captions.download**：官方 API，需 OAuth，list 50 units、download 200 units/支，僅能下載有權限的影片
-  - **youtube-transcript-api**：非官方、無 OAuth、無配額，使用內部端點，可能有 ToS 風險；適合批次取得公開影片字幕
-- [ ] 若無字幕則標記為需 Whisper 處理
+- [x] 實作 `search.list` 搜尋影片（關鍵字：台灣旅遊、台南兩天一夜等；建議 maxResults=50 以節省配額）
+- [x] 取得影片 metadata 並寫入 `videos` 表
+- [x] 實作字幕取得：採用 **youtube-transcript-api**（無 OAuth、無配額）；無字幕時由 index_video 降級 Whisper
+- [x] 若無字幕則標記為需 Whisper 處理（index_video.py 流程）
 - [ ] （建議）實作錯誤處理與重試：對 429/5xx 使用 exponential backoff（如 tenacity、backoff），最多 3 次重試
 
 ### 2. Whisper 整合
 
-- [ ] 使用 yt-dlp 下載影片音訊
-- [ ] 使用 openai-whisper 轉文字並取得時間戳
-- [ ] 輸出格式：`[(start_time, end_time, text), ...]`
+- [x] 使用 yt-dlp 下載影片音訊
+- [x] 使用 openai-whisper 轉文字並取得時間戳
+- [x] 輸出格式：`[(start_time, end_time, text), ...]`（whisper_transcribe.py）
 - [ ] （建議）實作逾時與失敗重試，避免單支影片失敗導致整批中斷
 
 ### 3. 字幕前處理
 
-- [ ] 整理字幕序列為統一格式
+- [x] 整理字幕序列為統一格式（transcripts.py、index_video 使用）
 - [ ] 整合 jieba 斷詞（選用）
-- [ ] 輸出供 Embedding 使用
+- [x] 輸出供 Embedding 使用
 
 ### 4. Embedding 與語意分段
 
 依據：paraphrase-multilingual-MiniLM-L12-v2 輸出維度 384；sentence-transformers 的 `encode()` 支援 `batch_size`，不同 batch_size 可能產生不同結果，應固定使用同一值。
 
-- [ ] 載入 sentence-transformers（paraphrase-multilingual-MiniLM-L12-v2）
-- [ ] 對字幕句子產生 embedding，使用 `encode(..., batch_size=N)`，N 需固定（例：32 或 64，依記憶體調整）
-- [ ] 處理完即釋放原文，不儲存
-- [ ] 實作語意分段演算法：cosine_similarity 閾值 + 時間間隔規則
-- [ ] 產出片段：起訖時間、summary、tags
+- [x] 載入 sentence-transformers（paraphrase-multilingual-MiniLM-L12-v2）
+- [x] 對字幕句子產生 embedding，使用 `encode(..., batch_size=32)` 固定（semantic_segment.py）
+- [x] 處理完即釋放原文，不儲存
+- [x] 實作語意分段演算法：cosine 相似度閾值 + 時間間隔規則（segment_by_semantic_similarity）
+- [x] 產出片段：起訖時間、summary、tags（Segment 結構）
 
 ### 5. 景點實體抽取與 Tag 產出
 
-- [ ] 字典/正則比對常見景點
-- [ ] 呼叫 Ollama LLM 從片段字幕抽取景點與類型（JSON 格式）
-- [ ] 解析並去重景點列表
-- [ ] 產出片段 tags：景點名稱、類型（美食/親子/室內/室外/文青/夜景等）
+- [ ] 字典/正則比對常見景點（選用，目前以 LLM 為主）
+- [x] 呼叫 Ollama LLM 從片段字幕抽取景點與類型（JSON 格式）（extract_places.py）
+- [x] 解析並去重景點列表
+- [x] 產出片段 tags：景點名稱、類型（美食/親子/室內/室外等）
 
 ### 6. 資料寫入與索引
 
 依據：`scripts/init-db.sql` 已建立 HNSW 向量索引；`scripts/migrations/001_initial_schema.sql` 已補上向量索引，與 init-db 一致。
 
-- [ ] 寫入 `videos`（metadata：youtube_id、title、channel 等，不儲存影片檔案）
-- [ ] 寫入 `segments`（時間戳、summary、tags、embedding_vector；不儲存完整 transcript）
-- [ ] 寫入 `places`（含 lat/lng，可後續補 Google Maps）
-- [ ] 寫入 `segment_places` 關聯
-- [ ] 確認 DB 已建立 segments、places 的 HNSW 向量索引（與 init-db.sql 一致）
-- [ ] 驗證 pgvector 查詢可用（例：`ORDER BY embedding_vector <-> :q LIMIT 10`）
+- [x] 寫入 `videos`（search_youtube.py：youtube_id、title、channel 等）
+- [x] 寫入 `segments`（index_video.py：時間戳、summary、tags、embedding_vector）
+- [x] 寫入 `places`（index_video.py；lat/lng 可後續補 Google Maps）
+- [x] 寫入 `segment_places` 關聯
+- [x] 確認 DB 已建立 segments、places 的 HNSW 向量索引（init-db.sql）
+- [ ] 驗證 pgvector 查詢可用（例：`ORDER BY embedding_vector <-> :q LIMIT 10`）（階段二 RAG 時實作）
 
 ### 7. Schema 與 Migration 一致性
 
-- [ ] 確認 `001_initial_schema.sql` 與 `init-db.sql` 內容一致（含向量索引）
-- [ ] 確認 `002_itineraries.sql` 已執行（itineraries、itinerary_days、itinerary_slots 表，供階段二使用）
+- [x] 確認 `001_initial_schema.sql` 與 `init-db.sql` 內容一致（含向量索引）
+- [x] 確認 `002_itineraries.sql` 已存在（itineraries、itinerary_days、itinerary_slots，供階段二使用）
+- [x] `003_add_segments_tags.sql` 已新增（segments.tags JSONB）
 
 ### 8. 驗收
 
@@ -206,10 +205,11 @@
 
 ### 1. Next.js 專案
 
-- [ ] 建立 frontend 專案（Next.js 14 App Router）
-- [ ] 設定 Tailwind CSS、shadcn/ui
-- [ ] 設計路由：首頁、Chat 頁、行程頁
+- [x] 建立 frontend 專案（Next.js App Router）
+- [x] 設定 Tailwind CSS
+- [x] 設計路由：首頁、Chat 頁、行程頁（app/page.tsx 含 Chat 與行程規劃 UI）
 - [ ] 設定 SSR/ISR（若有需要）
+- [ ] shadcn/ui（選用）
 
 ### 2. 首頁
 
@@ -219,10 +219,10 @@
 
 ### 3. Chat UI
 
-- [ ] 對話訊息列表元件
-- [ ] 輸入框（文字 + 語音按鈕）
-- [ ] 串流回應顯示
-- [ ] 快捷按鈕（改成 3 天 2 夜、加親子景點等）
+- [x] 對話訊息列表元件
+- [x] 輸入框（文字輸入）
+- [x] 串流回應顯示（對接 Ollama API，SSE）
+- [x] 快捷按鈕（如天數、親子景點等，依 page.tsx 實作）
 
 ### 4. 語音輸入
 
@@ -345,8 +345,8 @@
 
 以下項目已由專案設定完成，無須重複建置：
 
-- Docker Compose 設定（PostgreSQL、Redis、Ollama）
+- Docker Compose 設定（PostgreSQL、Redis、Ollama），Ollama 已啟用 NVIDIA GPU（deploy.resources.reservations.devices）
 - 資料庫 Schema（videos、segments、places、segment_places、itineraries 等）與 init-db.sql
-- Migration 腳本（001_initial_schema.sql、002_itineraries.sql）
-- 專案目錄結構
+- Migration 腳本（001_initial_schema.sql、002_itineraries.sql、003_add_segments_tags.sql）
+- 專案目錄結構（frontend、video-indexer、scripts、docs）
 - .env.example、API 金鑰取得指南、虛擬環境指南
