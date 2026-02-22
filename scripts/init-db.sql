@@ -107,3 +107,76 @@ CREATE TABLE IF NOT EXISTS itinerary_slots (
 CREATE INDEX IF NOT EXISTS idx_itineraries_session_id ON itineraries(session_id);
 CREATE INDEX IF NOT EXISTS idx_itinerary_days_itinerary_id ON itinerary_days(itinerary_id);
 CREATE INDEX IF NOT EXISTS idx_itinerary_slots_day_id ON itinerary_slots(day_id);
+
+-- users（使用者帳號）
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  last_login_at TIMESTAMP
+);
+
+-- user_profiles（個人化偏好）
+CREATE TABLE IF NOT EXISTS user_profiles (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  display_name VARCHAR(100),
+  travel_style VARCHAR(100),
+  budget_pref VARCHAR(50),
+  pace_pref VARCHAR(50),
+  transport_pref VARCHAR(50),
+  dietary_pref VARCHAR(100),
+  preferred_cities JSONB DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+-- user_memories（記憶事實）
+CREATE TABLE IF NOT EXISTS user_memories (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  memory_type VARCHAR(50) NOT NULL,
+  memory_text TEXT NOT NULL,
+  confidence NUMERIC(3,2) DEFAULT 0.80,
+  source VARCHAR(50) DEFAULT 'chat',
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- chat_sessions / chat_messages（對話歷史）
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  external_session_id VARCHAR(255),
+  title VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE (user_id, external_session_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id SERIAL PRIMARY KEY,
+  session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  role VARCHAR(20) NOT NULL,
+  content TEXT NOT NULL,
+  meta_json JSONB DEFAULT '{}'::jsonb,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+ALTER TABLE itineraries ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_user_memories_user_id ON user_memories(user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_itineraries_user_id ON itineraries(user_id);
+
+-- video_processing_cache（避免重複處理相同影片）
+CREATE TABLE IF NOT EXISTS video_processing_cache (
+  id SERIAL PRIMARY KEY,
+  youtube_id VARCHAR(20) NOT NULL,
+  processor_version VARCHAR(50) NOT NULL DEFAULT 'v1',
+  status VARCHAR(30) NOT NULL DEFAULT 'ready',
+  processed_at TIMESTAMP DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}'::jsonb,
+  UNIQUE (youtube_id, processor_version)
+);
+CREATE INDEX IF NOT EXISTS idx_video_processing_cache_youtube_id ON video_processing_cache(youtube_id);

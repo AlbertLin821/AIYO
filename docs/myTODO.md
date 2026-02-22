@@ -144,11 +144,11 @@
 
 #### 2a.1 專案架構
 
-- [ ] 建立 ai-service 專案結構與 requirements.txt
-- [ ] 實作 `POST /api/chat`（含 RAG、LLM、Tool-calling）
-- [ ] 實作 `GET /api/videos`、`GET /api/videos/:id/segments`、`GET /api/segments/:id`
-- [ ] 實作 `plan_itinerary` Tool：依 segments、days、preferences 產出行程 JSON，回傳給呼叫端
-- [ ] 啟用 Swagger / OpenAPI 文件
+- [x] 建立 ai-service 專案結構與 requirements.txt
+- [x] 實作 `POST /api/chat`（已支援 LLM 串流；RAG/Tool-calling 待補）
+- [x] 實作 `GET /api/videos`、`GET /api/videos/:id/segments`、`GET /api/segments/:id`
+- [x] 實作 `plan_itinerary` Tool：依 segments、days、preferences 產出行程 JSON，回傳給呼叫端（MVP）
+- [x] 啟用 Swagger / OpenAPI 文件（FastAPI `/docs`）
 
 #### 2a.2 Ollama 整合
 
@@ -164,15 +164,15 @@
 #### 2a.3 RAG 實作
 
 - [ ] 使用與 video-indexer 相同 Embedding 模型（paraphrase-multilingual-MiniLM-L12-v2，384 維）
-- [ ] Query 轉向量後在 pgvector 搜尋 segments（使用 HNSW 索引）
-- [ ] 整合搜尋結果為 context 傳給 LLM
-- [ ] 產生自然語言回覆
+- [x] Query 轉向量後在 pgvector 搜尋 segments（使用 HNSW 索引；`/api/tools/search-segments`）
+- [x] 整合搜尋結果為 context 傳給 LLM（`/api/chat` 已串接 RAG 第一版）
+- [x] 產生自然語言回覆（基於 RAG context + Ollama）
 
 #### 2a.4 Tool-calling
 
 - [ ] 定義 `search_segments`、`plan_itinerary` 工具 schema
-- [ ] 實作 `search_segments`：依 query、city、limit 查 pgvector
-- [ ] 實作 `plan_itinerary`：依 segments、days、preferences 產出行程 JSON
+- [x] 實作 `search_segments`：依 query、city、limit 查 pgvector（含文字降級）
+- [x] 實作 `plan_itinerary`：依 segments、days、preferences 產出行程 JSON（MVP）
 - [ ] 處理 tool call 回傳並二次呼叫 LLM 取得最終回覆
 
 #### 2a.5 四大模組
@@ -180,15 +180,41 @@
 - [ ] Tool-usage：解析與執行 tool call 邏輯
 - [ ] Recommendation：依 RAG 結果排序與篩選
 - [ ] Planning：呼叫 Google Maps（Directions、Distance Matrix）優化順序；建議實作重試與逾時
-- [ ] Memory：Redis 儲存/讀取 session 最近 N 則訊息
+- [x] Memory：Redis 儲存/讀取 session 最近 N 則訊息（api-gateway，失效時回退記憶體）
 
 ### 2b. api-gateway（Node.js + Express）
 
-- [ ] 建立 api-gateway 專案結構
-- [ ] 實作 `GET /api/chat/history/:sessionId`、`DELETE /api/chat/history/:sessionId`（或委託 ai-service，依架構決定）
-- [ ] 實作 `POST /api/itinerary`、`GET /api/itinerary/:id`、`PUT /api/itinerary/:id`、`DELETE /api/itinerary/:id`（寫入 itineraries 等表）
-- [ ] 實作 WebSocket：`message`、`stream_response`、`itinerary_update`（轉發至 ai-service 或直連）
-- [ ] 對接 ai-service（轉發 chat、RAG、行程規劃等請求）
+- [x] 建立 api-gateway 專案結構
+- [x] 實作 `GET /api/chat/history/:sessionId`、`DELETE /api/chat/history/:sessionId`（Redis 優先，失效回退記憶體）
+- [x] 實作 `POST /api/itinerary`、`GET /api/itinerary/:id`、`PUT /api/itinerary/:id`、`DELETE /api/itinerary/:id`（寫入 itineraries 等表）
+- [x] 實作 WebSocket：`message`、`stream_response`、`itinerary_update`（基礎通道：`/ws`）
+- [x] 對接 ai-service（已轉發 chat；RAG、行程規劃轉發待補）
+- [x] chat history 正式改為 DB（`chat_sessions`、`chat_messages`），Redis 保留快取用途
+
+### 2d. 帳號、主畫面與個人化（MVP）
+
+- [x] 建立 `users`、`user_profiles`、`user_memories`、`chat_sessions`、`chat_messages` schema
+- [x] 實作 Email/密碼註冊與登入（JWT）
+- [x] 前端新增登入頁與主畫面，未登入導向登入頁
+- [x] 將 chat/history/itinerary 與 `user_id` 關聯（保留 session 相容）
+- [x] 新對話與新安排行程前載入使用者偏好與記憶（skill-like）
+- [x] 個人化 API：`GET/PUT /api/user/profile`、`GET /api/user/memory`
+
+### 2e. AI 對話影片推薦（MVP）
+
+- [x] `POST /api/chat` 回傳推薦影片（最多 5 支，含縮圖、摘要、時間戳）
+- [x] 前端對話區顯示推薦卡片
+- [x] 點擊影片可開啟小型播放器
+- [x] 點擊時間戳可跳轉影片片段
+- [x] 推薦結果可對應使用者偏好
+- [x] 推薦排序加入個人化權重（profile + memory re-rank）
+
+### 2f. 效能與重複處理優化
+
+- [x] 已處理影片可直接由 DB 命中（不重跑分段與抽取）
+- [x] 影片索引流程加入去重鍵（youtube_id + 版本）
+- [x] Redis 快取熱門 query 與使用者 context
+- [x] 明確驗證：不儲存整部影片與完整字幕原文
 
 ### 2c. 驗收
 
@@ -226,10 +252,10 @@
 
 ### 4. 語音輸入
 
-- [ ] 整合 Web Speech API
-- [ ] 按住說話 UI 與狀態
-- [ ] 語音轉文字顯示於輸入框
-- [ ] 可編輯後再送出
+- [x] 整合 Web Speech API
+- [x] 按住說話 UI 與狀態
+- [x] 語音轉文字顯示於輸入框
+- [x] 可編輯後再送出
 
 ### 5. 影片牆與片段卡片
 
