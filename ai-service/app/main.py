@@ -6,10 +6,14 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import psycopg
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from psycopg.rows import dict_row
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 
 
 class ChatMessage(BaseModel):
@@ -40,6 +44,16 @@ class SearchSegmentsRequest(BaseModel):
     embedding_model: Optional[str] = None
 
 
+class PreferenceExtractResult(BaseModel):
+    budget: Optional[str] = None
+    travel_likes: List[str] = Field(default_factory=list)
+    video_likes: List[str] = Field(default_factory=list)
+    pace: Optional[str] = None
+    transport: Optional[str] = None
+    constraints: List[str] = Field(default_factory=list)
+    preferred_cities: List[str] = Field(default_factory=list)
+
+
 def get_env(name: str, default: str) -> str:
     value = os.getenv(name)
     if value is None or value == "":
@@ -51,12 +65,65 @@ DATABASE_URL = get_env("DATABASE_URL", "postgresql://aiyo:aiyo_password@localhos
 OLLAMA_BASE_URL = get_env("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = get_env("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_EMBED_MODEL = get_env("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+INTERNAL_SERVICE_TOKEN = get_env("AI_SERVICE_INTERNAL_TOKEN", "")
+ALLOWED_GATEWAY_ORIGINS = [item.strip() for item in get_env("AI_SERVICE_ALLOWED_ORIGINS", "http://localhost:3001").split(",") if item.strip()]
+ALLOWED_INTERNAL_IPS = [item.strip() for item in get_env("AI_SERVICE_ALLOWED_IPS", "127.0.0.1,::1").split(",") if item.strip()]
+SENTRY_DSN = get_env("SENTRY_DSN", "")
 
 app = FastAPI(title="AIYO ai-service", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_GATEWAY_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[FastApiIntegration()],
+        traces_sample_rate=0.1,
+    )
+
+Instrumentator().instrument(app).expose(app, include_in_schema=False, endpoint="/metrics")
+
+
+def require_internal_caller(request: Request, x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if INTERNAL_SERVICE_TOKEN and x_internal_token == INTERNAL_SERVICE_TOKEN:
+        return
+    client_ip = ""
+    if request.client and request.client.host:
+        client_ip = request.client.host
+    forwarded_for = request.headers.get("x-forwarded-for") or ""
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip() or client_ip
+    if client_ip in ALLOWED_INTERNAL_IPS:
+        return
+    raise HTTPException(status_code=403, detail="forbidden")
 
 
 def get_conn() -> psycopg.Connection:
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+
+def to_vector_literal(vector: List[float]) -> str:
+    return "[" + ",".join(str(x) for x in vector) + "]"
+
+
+def dedup_non_empty(items: List[str], limit: int = 12) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for item in items:
+        text = (item or "").strip()
+        if not text:
+            continue
+        if text not in seen:
+            seen.add(text)
+            result.append(text)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def fetch_all(query: str, params: tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
@@ -100,6 +167,160 @@ async def embedding_from_ollama(text: str, model: Optional[str] = None) -> Optio
     return None
 
 
+async def extract_preferences_from_conversation(messages: List[ChatMessage]) -> Optional[PreferenceExtractResult]:
+    recent = messages[-10:]
+    if not recent:
+        return None
+    conversation_lines = [
+        f"{idx + 1}. [{item.role}] {(item.content or '').replace(chr(10), ' ').strip()[:220]}"
+        for idx, item in enumerate(recent)
+        if (item.content or "").strip()
+    ]
+    if not conversation_lines:
+        return None
+    prompt = (
+        "請僅根據以下對話萃取『旅遊相關偏好』，忽略敏感資料與無關資訊。\n"
+        "只回傳 JSON，格式為：\n"
+        "{"
+        "\"budget\": \"\", "
+        "\"travel_likes\": [], "
+        "\"video_likes\": [], "
+        "\"pace\": \"\", "
+        "\"transport\": \"\", "
+        "\"constraints\": [], "
+        "\"preferred_cities\": []"
+        "}\n\n"
+        "規則：\n"
+        "1) 未出現可留空字串或空陣列。\n"
+        "2) 陣列元素要短、可重用、避免整句複製。\n"
+        "3) 僅萃取旅遊規劃有用的資訊。\n\n"
+        "[對話]\n"
+        + "\n".join(conversation_lines)
+    )
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+        response = await client.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "stream": False,
+                "format": "json",
+                "messages": [
+                    {"role": "system", "content": "你是旅遊偏好抽取器，輸出必須是 JSON。"},
+                    {"role": "user", "content": prompt},
+                ],
+                "options": {"temperature": 0.1, "num_predict": 512},
+            },
+        )
+    if response.status_code >= 400:
+        return None
+    data = response.json()
+    raw_content = ((data.get("message") or {}).get("content") or "").strip()
+    if not raw_content:
+        return None
+    try:
+        parsed = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return None
+    try:
+        model = PreferenceExtractResult.model_validate(parsed)
+    except Exception:
+        return None
+
+    # 將模型輸出做最小清理，避免異常資料污染長期偏好
+    cleaned = PreferenceExtractResult(
+        budget=(model.budget or "").strip() or None,
+        travel_likes=dedup_non_empty(model.travel_likes, limit=10),
+        video_likes=dedup_non_empty(model.video_likes, limit=8),
+        pace=(model.pace or "").strip() or None,
+        transport=(model.transport or "").strip() or None,
+        constraints=dedup_non_empty(model.constraints, limit=10),
+        preferred_cities=dedup_non_empty(model.preferred_cities, limit=10),
+    )
+    return cleaned
+
+
+def upsert_user_preferences(user_id: int, preferences: PreferenceExtractResult, embedding: List[float]) -> None:
+    vector_literal = to_vector_literal(embedding)
+    with get_conn() as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('app.user_id', %s, true)", (str(user_id),))
+                cur.execute(
+                    """
+                    INSERT INTO user_preferences (user_id, preferences_json, embedding_vector, updated_at)
+                    VALUES (%s, %s::jsonb, %s::vector, NOW())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                      preferences_json = EXCLUDED.preferences_json,
+                      embedding_vector = EXCLUDED.embedding_vector,
+                      updated_at = NOW()
+                    """,
+                    (user_id, json.dumps(preferences.model_dump(), ensure_ascii=False), vector_literal),
+                )
+
+
+async def maybe_extract_and_store_preferences(user_id: Optional[int], history: List[ChatMessage]) -> None:
+    if not user_id:
+        return
+    user_turn_count = sum(1 for item in history if item.role == "user")
+    if user_turn_count == 0 or user_turn_count % 3 != 0:
+        return
+    extracted = await extract_preferences_from_conversation(history)
+    if not extracted:
+        return
+    payload_text = json.dumps(extracted.model_dump(), ensure_ascii=False)
+    embedding = await embedding_from_ollama(payload_text)
+    if not embedding:
+        return
+    upsert_user_preferences(user_id, extracted, embedding)
+
+
+async def retrieve_user_preferences(
+    user_id: Optional[int],
+    query: str,
+    limit: int = 5,
+    similarity_threshold: float = 0.8,
+) -> List[Dict[str, Any]]:
+    if not user_id:
+        return []
+    query_embedding = await embedding_from_ollama(query)
+    if not query_embedding:
+        return []
+    vector_literal = to_vector_literal(query_embedding)
+    max_distance = max(0.0, 1.0 - similarity_threshold)
+    try:
+        with get_conn() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("SELECT set_config('app.user_id', %s, true)", (str(user_id),))
+                    cur.execute(
+                        """
+                        SELECT id, preferences_json, updated_at, (embedding_vector <=> %s::vector) AS distance
+                        FROM user_preferences
+                        WHERE user_id = %s
+                          AND embedding_vector IS NOT NULL
+                          AND (embedding_vector <=> %s::vector) <= %s
+                        ORDER BY distance ASC, updated_at DESC
+                        LIMIT %s
+                        """,
+                        (vector_literal, user_id, vector_literal, max_distance, max(3, min(limit, 5))),
+                    )
+                    rows = list(cur.fetchall())
+    except Exception:
+        return []
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        pref = row.get("preferences_json")
+        if isinstance(pref, dict):
+            items.append(
+                {
+                    "preferences_json": pref,
+                    "distance": float(row.get("distance") or 0.0),
+                    "updated_at": row.get("updated_at"),
+                }
+            )
+    return items
+
+
 def build_rag_context(items: List[Dict[str, Any]]) -> str:
     if not items:
         return ""
@@ -120,6 +341,17 @@ def build_rag_context(items: List[Dict[str, Any]]) -> str:
 def build_user_profile_context(user_id: Optional[int]) -> str:
     if not user_id:
         return ""
+    recent_dialogue = fetch_all(
+        """
+        SELECT m.role, m.content, m.created_at
+        FROM chat_messages m
+        JOIN chat_sessions s ON s.id = m.session_id
+        WHERE s.user_id = %s
+        ORDER BY m.created_at DESC
+        LIMIT 10
+        """,
+        (user_id,),
+    )
     profile = fetch_one(
         """
         SELECT display_name, travel_style, budget_pref, pace_pref, transport_pref, dietary_pref, preferred_cities
@@ -138,12 +370,21 @@ def build_user_profile_context(user_id: Optional[int]) -> str:
         """,
         (user_id,),
     )
-    if not profile and not memories:
+    if not profile and not memories and not recent_dialogue:
         return ""
 
     lines: List[str] = []
+    if recent_dialogue:
+        lines.append("短期記憶（近期對話重點）：")
+        for idx, item in enumerate(reversed(recent_dialogue), start=1):
+            role = item.get("role") or "user"
+            content = (item.get("content") or "").replace("\n", " ").strip()
+            if not content:
+                continue
+            lines.append(f"{idx}. [{role}] {content[:180]}")
+
     if profile:
-        lines.append("使用者偏好檔：")
+        lines.append("長期記憶（使用者偏好檔）：")
         lines.append(
             json.dumps(
                 {
@@ -159,7 +400,7 @@ def build_user_profile_context(user_id: Optional[int]) -> str:
             )
         )
     if memories:
-        lines.append("近期記憶：")
+        lines.append("長期記憶（已擷取個人事實）：")
         for idx, item in enumerate(memories, start=1):
             lines.append(
                 f"{idx}. type={item.get('memory_type')} confidence={item.get('confidence')} "
@@ -531,7 +772,8 @@ def get_segment(segment_id: int) -> Dict[str, Any]:
 
 
 @app.post("/api/tools/plan-itinerary")
-def plan_itinerary(payload: PlanItineraryRequest) -> Dict[str, Any]:
+def plan_itinerary(payload: PlanItineraryRequest, request: Request, x_internal_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_internal_caller(request, x_internal_token)
     # MVP: 先用簡單切分策略，後續再加入地圖路徑與時間優化
     result_days: List[Dict[str, Any]] = [{"day": idx + 1, "segments": []} for idx in range(payload.days)]
     for index, segment in enumerate(payload.segments):
@@ -546,16 +788,23 @@ def plan_itinerary(payload: PlanItineraryRequest) -> Dict[str, Any]:
 
 
 @app.post("/api/tools/search-segments")
-async def search_segments(payload: SearchSegmentsRequest) -> Dict[str, Any]:
+async def search_segments(payload: SearchSegmentsRequest, request: Request, x_internal_token: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    require_internal_caller(request, x_internal_token)
     return await search_segments_internal(payload.query, payload.city, payload.limit, payload.embedding_model)
 
 
 @app.post("/api/chat")
-async def chat(payload: ChatRequest):
+async def chat(payload: ChatRequest, request: Request, x_internal_token: Optional[str] = Header(default=None)):
+    require_internal_caller(request, x_internal_token)
     model = payload.model or OLLAMA_MODEL
     safe_history = [m for m in payload.messages if m.content.strip()]
     if not safe_history or safe_history[-1].content != payload.message:
         safe_history.append(ChatMessage(role="user", content=payload.message))
+    try:
+        await maybe_extract_and_store_preferences(payload.user_id, safe_history)
+    except Exception:
+        # 偏好抽取失敗不應阻斷主聊天流程
+        pass
 
     rag = await search_segments_internal(
         query=payload.message,
@@ -566,13 +815,29 @@ async def chat(payload: ChatRequest):
     rag_items = rag.get("items") or []
     rag_context = build_rag_context(rag_items)
     user_profile_context = build_user_profile_context(payload.user_id)
+    preference_hits = await retrieve_user_preferences(payload.user_id, payload.message, limit=5, similarity_threshold=0.8)
     recommended_videos = get_recommended_videos(payload.message, payload.city, payload.user_id, limit=5)
 
     system_text = "你是 AIYO 旅遊助理。請全程使用繁體中文回覆，並避免使用簡體中文。"
     if user_profile_context:
         system_text += (
-            "\n\n以下是使用者的偏好與記憶資料，請優先用於個人化建議：\n"
+            "\n\n以下是使用者的短期與長期記憶資料，請優先用於個人化建議：\n"
             f"{user_profile_context}\n"
+            "請主動使用這些記憶辨識使用者身分、偏好、去過地點與限制，並在規劃中延續。"
+        )
+    if preference_hits:
+        compact_preferences = [
+            {
+                "distance": round(float(item.get("distance") or 0.0), 4),
+                "updated_at": str(item.get("updated_at") or ""),
+                "preferences": item.get("preferences_json") or {},
+            }
+            for item in preference_hits[:5]
+        ]
+        system_text += (
+            "\n\n以下是語意檢索到的長期偏好（最多 5 筆，threshold=0.8）：\n"
+            f"{json.dumps(compact_preferences, ensure_ascii=False)}\n"
+            "請優先用這些偏好做行程與影片建議，若彼此衝突，優先採用更新時間較新的偏好。"
         )
     if rag_context:
         system_text += (

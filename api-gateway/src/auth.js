@@ -21,6 +21,18 @@ export function signToken(user) {
   );
 }
 
+export function signRefreshToken(user) {
+  return jwt.sign(
+    {
+      sub: String(user.id),
+      email: user.email,
+      type: "refresh"
+    },
+    config.jwtRefreshSecret,
+    { expiresIn: config.jwtRefreshExpiresIn }
+  );
+}
+
 export function readBearerToken(req) {
   const raw = req.headers.authorization;
   const authHeader = Array.isArray(raw) ? raw[0] : raw || "";
@@ -32,6 +44,14 @@ export function readBearerToken(req) {
 
 export function verifyToken(token) {
   return jwt.verify(token, config.jwtSecret);
+}
+
+export function verifyRefreshToken(token) {
+  const payload = jwt.verify(token, config.jwtRefreshSecret);
+  if (!payload || payload.type !== "refresh") {
+    throw new Error("invalid refresh token type");
+  }
+  return payload;
 }
 
 export function requireAuth(req, res, next) {

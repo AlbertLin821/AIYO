@@ -28,17 +28,6 @@ type MapSearchResult = {
   rating?: number;
 };
 
-type SegmentSearchItem = {
-  id: number;
-  video_id: number;
-  start_sec: number;
-  end_sec: number;
-  summary?: string;
-  tags?: unknown;
-  city?: string | null;
-  distance?: number;
-};
-
 type UserProfile = {
   display_name?: string | null;
   travel_style?: string | null;
@@ -132,85 +121,30 @@ type PlannerState = {
   commentMode: CommentMode;
 };
 
-const places: Place[] = [
-  {
-    id: "p1",
-    name: "安平古堡",
-    intro: "台南代表性古蹟，可快速理解安平歷史脈絡。",
-    address: "台南市安平區國勝路82號",
-    phone: "06-2267348",
-    website: "https://www.twtainan.net/zh-tw/attractions/detail/661",
-    rating: 4.3,
-    hours: "08:30-17:30",
-    reasons: ["歷史文化完整", "適合半日參觀", "交通節點方便"],
-    notes: ["建議上午前往避開人潮", "周邊可順遊安平老街", "夏季日照強需防曬", "古蹟區階梯較多"],
-    stayMinutes: 90,
-    estimatedCost: 150,
-    recommended: true,
-    x: 24,
-    y: 34,
-    lat: 22.999,
-    lng: 120.16,
-    googleComments: ["古蹟保存良好，導覽內容完整。", "周邊小吃多，停留時間比預期長。"]
-  },
-  {
-    id: "p2",
-    name: "神農街",
-    intro: "老屋與文創店家聚集，夜間燈光氣氛佳。",
-    address: "台南市中西區神農街",
-    phone: "06-2991111",
-    website: "https://www.twtainan.net/zh-tw/attractions/detail/709",
-    rating: 4.4,
-    hours: "全天開放",
-    reasons: ["夜間拍照效果佳", "步行友善", "可串接美食路線"],
-    notes: ["傍晚後人潮較多", "建議穿好走鞋", "可預留時間逛文創店", "注意店家營業時間差異"],
-    stayMinutes: 75,
-    estimatedCost: 200,
-    recommended: false,
-    x: 50,
-    y: 52,
-    lat: 22.996,
-    lng: 120.196,
-    googleComments: ["街景很有特色，適合拍照。", "假日較擁擠，建議平日前往。"]
-  },
-  {
-    id: "p3",
-    name: "奇美博物館",
-    intro: "館藏豐富，適合安排半天以上室內行程。",
-    address: "台南市仁德區文華路二段66號",
-    phone: "06-2660808",
-    website: "https://www.chimeimuseum.org/",
-    rating: 4.7,
-    hours: "09:30-17:30",
-    reasons: ["展覽內容多元", "雨天備案友善", "親子與朋友皆適合"],
-    notes: ["建議先線上購票", "館區較大需保留移動時間", "熱門展區可能排隊", "可搭配戶外園區散步"],
-    stayMinutes: 180,
-    estimatedCost: 450,
-    recommended: true,
-    x: 70,
-    y: 68,
-    lat: 22.934,
-    lng: 120.226,
-    googleComments: ["館藏內容豐富，值得慢慢看。", "停車便利，整體體驗很不錯。"]
-  }
-];
+const places: Place[] = [];
 
-const initialState: PlannerState = {
-  days: [
-    { id: "day1", label: "2026/02/21 (六)", placeIds: ["p1", "p2"] },
-    { id: "day2", label: "2026/02/22 (日)", placeIds: ["p3"] },
-    { id: "day3", label: "2026/02/23 (一)", placeIds: [] }
-  ],
-  selectedDayId: "day1",
-  pendingPlaceIds: [],
-  transportModes: {},
-  budgetMode: "C",
-  totalBudget: 5000,
-  spentBudget: 1200,
-  aiPanelMode: "C",
-  multiDayMode: "B",
-  commentMode: "C"
-};
+function createDefaultDayLabel(baseDate = new Date()): string {
+  const weekdayText = ["日", "一", "二", "三", "四", "五", "六"];
+  const y = baseDate.getFullYear();
+  const m = String(baseDate.getMonth() + 1).padStart(2, "0");
+  const d = String(baseDate.getDate()).padStart(2, "0");
+  return `${y}/${m}/${d} (${weekdayText[baseDate.getDay()]})`;
+}
+
+function createInitialState(): PlannerState {
+  return {
+    days: [{ id: "day1", label: createDefaultDayLabel(), placeIds: [] }],
+    selectedDayId: "day1",
+    pendingPlaceIds: [],
+    transportModes: {},
+    budgetMode: "C",
+    totalBudget: 0,
+    spentBudget: 0,
+    aiPanelMode: "C",
+    multiDayMode: "B",
+    commentMode: "C"
+  };
+}
 
 function deepCloneState(input: PlannerState): PlannerState {
   return JSON.parse(JSON.stringify(input)) as PlannerState;
@@ -297,11 +231,16 @@ function remapTransportModes(
 }
 
 const CHAT_MEMORY_LIMIT = 20;
-const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
-  { role: "assistant", content: "請描述你想要的旅遊風格，我會推薦景點。" }
-];
+const INITIAL_CHAT_MESSAGES: ChatMessage[] = [];
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001").replace(/\/$/, "");
 const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+
+function createSessionId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `session-${crypto.randomUUID()}`;
+  }
+  return `session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function loadGoogleMapsApi(): Promise<typeof google> {
   if (typeof window === "undefined") {
@@ -488,7 +427,7 @@ function markdownToSafeHtml(markdown: string): string {
 export default function HomePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [history, setHistory] = useState<PlannerState[]>([initialState]);
+  const [history, setHistory] = useState<PlannerState[]>([createInitialState()]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
@@ -507,8 +446,9 @@ export default function HomePage() {
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [chatDegraded, setChatDegraded] = useState(false);
   const [chatLoading, setChatLoading] = useState(false);
-  const [chatSessionId, setChatSessionId] = useState("session-anon");
+  const [chatSessionId, setChatSessionId] = useState(() => createSessionId());
   const sessionFromUrl = searchParams.get("session");
   useEffect(() => {
     if (sessionFromUrl && sessionFromUrl.trim()) {
@@ -520,25 +460,18 @@ export default function HomePage() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [segmentQuery, setSegmentQuery] = useState("");
-  const [segmentCity, setSegmentCity] = useState("");
-  const [segmentLimit, setSegmentLimit] = useState(8);
-  const [segmentLoading, setSegmentLoading] = useState(false);
-  const [segmentMode, setSegmentMode] = useState<string>("");
-  const [segmentItems, setSegmentItems] = useState<SegmentSearchItem[]>([]);
-  const [segmentError, setSegmentError] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authEmail, setAuthEmail] = useState("");
   const [profile, setProfile] = useState<UserProfile>({});
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
   const [memoryItems, setMemoryItems] = useState<Array<{ id: number; memory_text: string; memory_type: string }>>([]);
+  const [memoryReviewing, setMemoryReviewing] = useState(false);
+  const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
+  const [autoMemorySync, setAutoMemorySync] = useState(false);
   const [recommendedVideos, setRecommendedVideos] = useState<RecommendedVideo[]>([]);
   const [playerVideo, setPlayerVideo] = useState<RecommendedVideo | null>(null);
   const [playerStartSec, setPlayerStartSec] = useState(0);
-  const [wsConnected, setWsConnected] = useState(false);
-  const [wsStreamPreview, setWsStreamPreview] = useState("");
-  const [wsItineraryEvents, setWsItineraryEvents] = useState<Array<{ action: string; at: string }>>([]);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -547,11 +480,15 @@ export default function HomePage() {
   const wsRef = useRef<WebSocket | null>(null);
   const streamingViaSseRef = useRef(false);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const googleMapRef = useRef<google.maps.Map | null>(null);
   const mapClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const markerRefs = useRef<Map<string, google.maps.Marker>>(new Map());
   const searchResultMarkersRef = useRef<google.maps.Marker[]>([]);
   const placesServiceRef = useRef<google.maps.places.PlacesService | null>(null);
+  const searchBoxRef = useRef<google.maps.places.SearchBox | null>(null);
+  const searchBoxPlacesChangedListenerRef = useRef<google.maps.MapsEventListener | null>(null);
+  const searchBoxBoundsChangedListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const streetViewServiceRef = useRef<google.maps.StreetViewService | null>(null);
 
   const state = history[historyIndex];
@@ -642,6 +579,156 @@ export default function HomePage() {
     map.fitBounds(bounds, 80);
   }
 
+  function normalizePlaceResults(placeResults: google.maps.places.PlaceResult[]): MapSearchResult[] {
+    const merged = new Map<string, MapSearchResult>();
+    for (const item of placeResults) {
+      if (!item.geometry?.location) {
+        continue;
+      }
+      const id = item.place_id ?? `${item.name ?? "result"}-${item.geometry.location.toUrlValue()}`;
+      if (!merged.has(id)) {
+        merged.set(id, {
+          id,
+          name: item.name ?? "未命名地點",
+          address: item.formatted_address ?? item.vicinity ?? "無地址資訊",
+          lat: item.geometry.location.lat(),
+          lng: item.geometry.location.lng(),
+          rating: item.rating
+        });
+      }
+    }
+    return Array.from(merged.values());
+  }
+
+  async function searchFromAutocompletePredictions(
+    query: string,
+    map: google.maps.Map,
+    googleApi: typeof google
+  ): Promise<MapSearchResult[]> {
+    const input = query.trim();
+    if (!input) {
+      return [];
+    }
+
+    const autocompleteService = new googleApi.maps.places.AutocompleteService();
+    const boundedRequest: google.maps.places.AutocompletionRequest = { input };
+    if (mapSearchMode === "center") {
+      const bounds = map.getBounds();
+      if (bounds) {
+        boundedRequest.bounds = bounds;
+      }
+    }
+    const globalRequest: google.maps.places.AutocompletionRequest = { input };
+
+    const [boundedPredictions, globalPredictions, queryPredictions] = await Promise.all([
+      new Promise<google.maps.places.AutocompletePrediction[]>((resolve) => {
+        autocompleteService.getPlacePredictions(boundedRequest, (items, status) => {
+          if (status !== googleApi.maps.places.PlacesServiceStatus.OK || !items?.length) {
+            resolve([]);
+            return;
+          }
+          resolve(items.slice(0, 12));
+        });
+      }),
+      new Promise<google.maps.places.AutocompletePrediction[]>((resolve) => {
+        autocompleteService.getPlacePredictions(globalRequest, (items, status) => {
+          if (status !== googleApi.maps.places.PlacesServiceStatus.OK || !items?.length) {
+            resolve([]);
+            return;
+          }
+          resolve(items.slice(0, 12));
+        });
+      }),
+      new Promise<google.maps.places.QueryAutocompletePrediction[]>((resolve) => {
+        autocompleteService.getQueryPredictions({ input }, (items, status) => {
+          if (status !== googleApi.maps.places.PlacesServiceStatus.OK || !items?.length) {
+            resolve([]);
+            return;
+          }
+          resolve(items.slice(0, 8));
+        });
+      })
+    ]);
+
+    const predictionById = new Map<string, google.maps.places.AutocompletePrediction>();
+    [...boundedPredictions, ...globalPredictions].forEach((item) => {
+      if (!predictionById.has(item.place_id)) {
+        predictionById.set(item.place_id, item);
+      }
+    });
+    const predictions = Array.from(predictionById.values());
+
+    const placesService = placesServiceRef.current ?? new googleApi.maps.places.PlacesService(map);
+    placesServiceRef.current = placesService;
+    const details =
+      predictions.length > 0
+        ? await Promise.all(
+            predictions.map(
+              (prediction) =>
+                new Promise<MapSearchResult | null>((resolve) => {
+                  placesService.getDetails(
+                    {
+                      placeId: prediction.place_id,
+                      fields: ["place_id", "name", "formatted_address", "geometry", "rating"]
+                    },
+                    (item, status) => {
+                      if (status !== googleApi.maps.places.PlacesServiceStatus.OK || !item?.geometry?.location) {
+                        resolve(null);
+                        return;
+                      }
+                      resolve({
+                        id: item.place_id ?? prediction.place_id,
+                        name: item.name ?? prediction.structured_formatting.main_text ?? "未命名地點",
+                        address: item.formatted_address ?? prediction.description ?? "無地址資訊",
+                        lat: item.geometry.location.lat(),
+                        lng: item.geometry.location.lng(),
+                        rating: item.rating
+                      });
+                    }
+                  );
+                })
+            )
+          )
+        : [];
+
+    const queryTexts = new Set<string>();
+    queryTexts.add(input);
+    predictions.forEach((item) => queryTexts.add(item.description));
+    queryPredictions.forEach((item) => queryTexts.add(item.description));
+    const expandedQueryTexts = Array.from(queryTexts).slice(0, 10);
+    const expandedByText = await Promise.all(
+      expandedQueryTexts.map(
+        (text) =>
+          new Promise<google.maps.places.PlaceResult[]>((resolve) => {
+            placesService.textSearch({ query: text }, (items, status) => {
+              if (status !== googleApi.maps.places.PlacesServiceStatus.OK || !items?.length) {
+                resolve([]);
+                return;
+              }
+              resolve(items);
+            });
+          })
+      )
+    );
+    const expandedResults = normalizePlaceResults(expandedByText.flat());
+
+    const merged = new Map<string, MapSearchResult>();
+    for (const item of details) {
+      if (!item) {
+        continue;
+      }
+      if (!merged.has(item.id)) {
+        merged.set(item.id, item);
+      }
+    }
+    for (const item of expandedResults) {
+      if (!merged.has(item.id)) {
+        merged.set(item.id, item);
+      }
+    }
+    return Array.from(merged.values());
+  }
+
   async function onMapSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const query = searchText.trim();
@@ -658,37 +745,23 @@ export default function HomePage() {
     const normalizedQuery = query.toLocaleLowerCase();
     const localMatches = places
       .filter(
-      (place) =>
-        place.name.toLocaleLowerCase().includes(normalizedQuery) ||
-        place.address.toLocaleLowerCase().includes(normalizedQuery)
+        (place) =>
+          place.name.toLocaleLowerCase().includes(normalizedQuery) ||
+          place.address.toLocaleLowerCase().includes(normalizedQuery)
       )
       .slice(0, 8);
-    if (localMatches.length > 0) {
-      const localResults: MapSearchResult[] = localMatches.map((place) => ({
-        id: place.id,
-        name: place.name,
-        address: place.address,
-        lat: place.lat,
-        lng: place.lng,
-        rating: place.rating
-      }));
-      setMapSearchResults(localResults);
-      setMapActionError(null);
-      setSelectedPlaceId(localMatches[0].id);
-      renderSearchResultsOnMap(localResults, map, googleApi);
-      return;
-    }
+
+    const predictionResults = await searchFromAutocompletePredictions(query, map, googleApi);
 
     const placesService = placesServiceRef.current ?? new googleApi.maps.places.PlacesService(map);
     placesServiceRef.current = placesService;
     setMapActionError(null);
-    const candidateQuery = /[台臺]灣/.test(query) ? query : `${query} 台灣`;
     const mapCenter = map.getCenter() ?? null;
     const radiusMeters = Math.max(1000, Math.min(50000, Math.round(mapSearchRadiusKm * 1000)));
     const textSearchRequest: google.maps.places.TextSearchRequest =
       mapSearchMode === "center" && mapCenter
-        ? { query: candidateQuery, location: mapCenter, radius: radiusMeters }
-        : { query: candidateQuery };
+        ? { query, location: mapCenter, radius: radiusMeters }
+        : { query };
 
     const searchWithPagination = async (request: google.maps.places.TextSearchRequest) =>
       new Promise<{
@@ -728,20 +801,12 @@ export default function HomePage() {
           }
 
           for (const item of results) {
-            if (!item.geometry?.location) {
-              continue;
-            }
-            const id = item.place_id ?? `${item.name ?? "result"}-${item.geometry.location.toUrlValue()}`;
-            if (!merged.has(id)) {
-              merged.set(id, {
-                id,
-                name: item.name ?? "未命名地點",
-                address: item.formatted_address ?? item.vicinity ?? "無地址資訊",
-                lat: item.geometry.location.lat(),
-                lng: item.geometry.location.lng(),
-                rating: item.rating
-              });
-            }
+              const normalized = normalizePlaceResults([item]);
+              for (const normalizedItem of normalized) {
+                if (!merged.has(normalizedItem.id)) {
+                  merged.set(normalizedItem.id, normalizedItem);
+                }
+              }
           }
 
           pages += 1;
@@ -779,8 +844,19 @@ export default function HomePage() {
     const primary = await searchWithPagination(textSearchRequest);
     let status = primary.status;
     let items = primary.items;
+    if (items.length === 0 && !/[台臺]灣/.test(query)) {
+      const withTaiwan = await searchWithPagination(
+        mapSearchMode === "center" && mapCenter
+          ? { query: `${query} 台灣`, location: mapCenter, radius: radiusMeters }
+          : { query: `${query} 台灣` }
+      );
+      if (withTaiwan.items.length > 0) {
+        status = withTaiwan.status;
+        items = withTaiwan.items;
+      }
+    }
     if (mapSearchMode === "center" && items.length < 8) {
-      const globalFallback = await searchWithPagination({ query: candidateQuery });
+      const globalFallback = await searchWithPagination({ query });
       status = globalFallback.status === googleApi.maps.places.PlacesServiceStatus.OK ? globalFallback.status : status;
       const merged = new Map<string, MapSearchResult>();
       for (const item of items) merged.set(item.id, item);
@@ -791,19 +867,34 @@ export default function HomePage() {
       }
       items = Array.from(merged.values());
     }
-    if (status === googleApi.maps.places.PlacesServiceStatus.REQUEST_DENIED) {
+    if (status === googleApi.maps.places.PlacesServiceStatus.REQUEST_DENIED && predictionResults.length === 0) {
       setMapSearchResults([]);
       clearSearchResultMarkers();
       setMapActionError("搜尋被拒絕（REQUEST_DENIED）。請確認前端金鑰已啟用 Places API。");
       return;
     }
-    if (status === googleApi.maps.places.PlacesServiceStatus.OVER_QUERY_LIMIT) {
+    if (status === googleApi.maps.places.PlacesServiceStatus.OVER_QUERY_LIMIT && predictionResults.length === 0) {
       setMapSearchResults([]);
       clearSearchResultMarkers();
       setMapActionError("搜尋暫時超過查詢上限，請稍後再試。");
       return;
     }
-    if (status !== googleApi.maps.places.PlacesServiceStatus.OK || items.length === 0) {
+    if ((status !== googleApi.maps.places.PlacesServiceStatus.OK || items.length === 0) && predictionResults.length === 0) {
+      if (localMatches.length > 0) {
+        const localResults: MapSearchResult[] = localMatches.map((place) => ({
+          id: place.id,
+          name: place.name,
+          address: place.address,
+          lat: place.lat,
+          lng: place.lng,
+          rating: place.rating
+        }));
+        setSelectedPlaceId(localMatches[0].id);
+        setMapSearchResults(localResults);
+        setMapActionError(null);
+        renderSearchResultsOnMap(localResults, map, googleApi);
+        return;
+      }
       setMapSearchResults([]);
       clearSearchResultMarkers();
       setMapActionError("找不到相關地點，請換一組關鍵字。");
@@ -829,11 +920,38 @@ export default function HomePage() {
       return (b.rating ?? 0) - (a.rating ?? 0);
     });
     const topResults = ranked.slice(0, 50);
+    const mergedById = new Map<string, MapSearchResult>();
+    for (const item of predictionResults) {
+      if (!mergedById.has(item.id)) {
+        mergedById.set(item.id, item);
+      }
+    }
+    for (const item of topResults) {
+      if (!mergedById.has(item.id)) {
+        mergedById.set(item.id, item);
+      }
+    }
+    const finalResults = Array.from(mergedById.values()).slice(0, 50);
+    if (finalResults.length === 0 && localMatches.length > 0) {
+      const localResults: MapSearchResult[] = localMatches.map((place) => ({
+        id: place.id,
+        name: place.name,
+        address: place.address,
+        lat: place.lat,
+        lng: place.lng,
+        rating: place.rating
+      }));
+      setSelectedPlaceId(localMatches[0].id);
+      setMapSearchResults(localResults);
+      setMapActionError(null);
+      renderSearchResultsOnMap(localResults, map, googleApi);
+      return;
+    }
 
     setSelectedPlaceId(null);
-    setMapSearchResults(topResults);
+    setMapSearchResults(finalResults);
     setMapActionError(null);
-    renderSearchResultsOnMap(topResults, map, googleApi);
+    renderSearchResultsOnMap(finalResults, map, googleApi);
   }
 
   function locateCurrentPosition() {
@@ -890,12 +1008,49 @@ export default function HomePage() {
     }
   }
 
-  function getAuthHeaders(extra?: Record<string, string>): Record<string, string> {
-    const token = getAccessToken();
+  function getAuthHeaders(extra?: Record<string, string>, tokenOverride?: string): Record<string, string> {
+    const token = tokenOverride ?? getAccessToken();
     return {
       ...(extra ?? {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     };
+  }
+
+  async function refreshAccessToken(): Promise<string> {
+    const response = await fetch(`${API_BASE_URL}/api/auth/refresh`, {
+      method: "POST",
+      credentials: "include"
+    });
+    if (!response.ok) {
+      throw new Error("refresh failed");
+    }
+    const data = (await response.json().catch(() => ({}))) as { token?: string; access_token?: string };
+    const token = data.access_token || data.token || "";
+    if (!token) {
+      throw new Error("refresh token missing");
+    }
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("aiyo_token", token);
+    }
+    return token;
+  }
+
+  async function apiFetchWithAuth(url: string, init?: RequestInit, allowRetry = true): Promise<Response> {
+    const token = getAccessToken();
+    const response = await fetch(url, {
+      ...(init ?? {}),
+      credentials: "include",
+      headers: getAuthHeaders((init?.headers as Record<string, string> | undefined) ?? {}, token || "")
+    });
+    if (response.status !== 401 || !allowRetry) {
+      return response;
+    }
+    const refreshedToken = await refreshAccessToken();
+    return fetch(url, {
+      ...(init ?? {}),
+      credentials: "include",
+      headers: getAuthHeaders((init?.headers as Record<string, string> | undefined) ?? {}, refreshedToken)
+    });
   }
 
   useEffect(() => {
@@ -918,6 +1073,7 @@ export default function HomePage() {
           center: { lat: 23.000, lng: 120.200 },
           zoom: 10,
           mapTypeId: "roadmap",
+          gestureHandling: "greedy",
           streetViewControl: true,
           fullscreenControl: false
         });
@@ -983,6 +1139,87 @@ export default function HomePage() {
 
   useEffect(() => {
     const map = googleMapRef.current;
+    const input = searchInputRef.current;
+    const googleApi = window.google;
+    if (!map || !input || !googleApi?.maps?.places) {
+      return;
+    }
+    if (searchBoxRef.current) {
+      return;
+    }
+
+    const searchBox = new googleApi.maps.places.SearchBox(input);
+    searchBoxRef.current = searchBox;
+
+    const updateSearchBounds = () => {
+      const bounds = map.getBounds();
+      if (bounds) {
+        searchBox.setBounds(bounds);
+      }
+    };
+    updateSearchBounds();
+    searchBoxBoundsChangedListenerRef.current = map.addListener("bounds_changed", updateSearchBounds);
+
+    searchBoxPlacesChangedListenerRef.current = searchBox.addListener("places_changed", () => {
+      void (async () => {
+        const placeResults = searchBox.getPlaces() ?? [];
+        let results = normalizePlaceResults(placeResults);
+        const inputQuery = input.value.trim();
+
+        // SearchBox 通常只會回傳使用者點選的一筆，這裡補一次文字搜尋來擴展同名結果。
+        if (results.length <= 1 && inputQuery) {
+          const placesService = placesServiceRef.current ?? new googleApi.maps.places.PlacesService(map);
+          placesServiceRef.current = placesService;
+          const broadQuery = (placeResults[0]?.name?.trim() || inputQuery.split(",")[0]?.trim() || inputQuery).trim();
+          const mapCenter = map.getCenter() ?? null;
+          const radiusMeters = Math.max(1000, Math.min(50000, Math.round(mapSearchRadiusKm * 1000)));
+          const request: google.maps.places.TextSearchRequest =
+            mapSearchMode === "center" && mapCenter
+              ? { query: broadQuery, location: mapCenter, radius: radiusMeters }
+              : { query: broadQuery };
+
+          const expanded = await new Promise<google.maps.places.PlaceResult[]>((resolve) => {
+            placesService.textSearch(request, (textResults, status) => {
+              if (status !== googleApi.maps.places.PlacesServiceStatus.OK || !textResults) {
+                resolve([]);
+                return;
+              }
+              resolve(textResults);
+            });
+          });
+
+          const expandedResults = normalizePlaceResults(expanded);
+          if (expandedResults.length > results.length) {
+            results = expandedResults;
+          }
+        }
+
+        if (results.length === 0) {
+          setMapSearchResults([]);
+          clearSearchResultMarkers();
+          setMapActionError("找不到可顯示的地點，請嘗試其他關鍵字。");
+          return;
+        }
+
+        setMapActionError(null);
+        setSelectedPlaceId(null);
+        setMapSearchResults(results);
+        setSearchText(input.value);
+        renderSearchResultsOnMap(results, map, googleApi);
+      })();
+    });
+
+    return () => {
+      searchBoxPlacesChangedListenerRef.current?.remove();
+      searchBoxBoundsChangedListenerRef.current?.remove();
+      searchBoxPlacesChangedListenerRef.current = null;
+      searchBoxBoundsChangedListenerRef.current = null;
+      searchBoxRef.current = null;
+    };
+  }, [mapReady]);
+
+  useEffect(() => {
+    const map = googleMapRef.current;
     const marker = selectedPlaceId ? markerRefs.current.get(selectedPlaceId) : null;
     if (!map || !marker) {
       return;
@@ -1032,9 +1269,7 @@ export default function HomePage() {
         return;
       }
       try {
-        const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
-          headers: getAuthHeaders()
-        });
+        const response = await apiFetchWithAuth(`${API_BASE_URL}/api/auth/me`);
         if (!response.ok) {
           window.localStorage.removeItem("aiyo_token");
           router.replace("/login");
@@ -1096,15 +1331,13 @@ export default function HomePage() {
   }, [authReady]);
 
   useEffect(() => {
-    if (!authReady || !chatSessionId || chatSessionId === "session-anon") {
+    if (!authReady || !chatSessionId) {
       return;
     }
     let alive = true;
     void (async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/chat/history/${encodeURIComponent(chatSessionId)}`, {
-          headers: getAuthHeaders()
-        });
+        const response = await apiFetchWithAuth(`${API_BASE_URL}/api/chat/history/${encodeURIComponent(chatSessionId)}`);
         if (!response.ok) {
           return;
         }
@@ -1115,10 +1348,14 @@ export default function HomePage() {
           return;
         }
         const rows = (data.messages || [])
-          .map((item) => ({
-            role: item.role === "user" || item.role === "assistant" || item.role === "system" ? item.role : "assistant",
-            content: item.content || ""
-          }))
+          .map((item): ChatMessage => {
+            const role: ChatRole =
+              item.role === "user" || item.role === "assistant" || item.role === "system" ? item.role : "assistant";
+            return {
+              role,
+              content: item.content || ""
+            };
+          })
           .filter((item) => item.content.trim().length > 0);
         setChatMessages(rows.length > 0 ? rows : INITIAL_CHAT_MESSAGES);
       } catch {
@@ -1143,7 +1380,6 @@ export default function HomePage() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setWsConnected(true);
       ws.send(
         JSON.stringify({
           type: "subscribe",
@@ -1153,13 +1389,10 @@ export default function HomePage() {
     };
 
     ws.onclose = () => {
-      setWsConnected(false);
       wsRef.current = null;
     };
 
-    ws.onerror = () => {
-      setWsConnected(false);
-    };
+    ws.onerror = () => {};
 
     ws.onmessage = (event) => {
       try {
@@ -1172,7 +1405,6 @@ export default function HomePage() {
         if (data.type === "stream_response" && data.sessionId === chatSessionId && data.chunk) {
           const tokens = extractWsStreamTokens(data.chunk);
           if (tokens) {
-            setWsStreamPreview((prev) => `${prev}${tokens}`.slice(-300));
             setChatMessages((prev) => {
               if (streamingViaSseRef.current) return prev;
               const last = prev[prev.length - 1];
@@ -1185,11 +1417,6 @@ export default function HomePage() {
             });
           }
         }
-        if (data.type === "itinerary_update") {
-          setWsItineraryEvents((prev) =>
-            [{ action: data.action || "updated", at: new Date().toLocaleTimeString("zh-TW") }, ...prev].slice(0, 8)
-          );
-        }
       } catch {
         // Ignore malformed websocket payload.
       }
@@ -1198,7 +1425,6 @@ export default function HomePage() {
     return () => {
       ws.close();
       wsRef.current = null;
-      setWsConnected(false);
     };
   }, [authReady, chatSessionId]);
 
@@ -1211,8 +1437,8 @@ export default function HomePage() {
     void (async () => {
       try {
         const [profileResponse, memoryResponse] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/user/profile`, { headers: getAuthHeaders() }),
-          fetch(`${API_BASE_URL}/api/user/memory?limit=8`, { headers: getAuthHeaders() })
+          apiFetchWithAuth(`${API_BASE_URL}/api/user/profile`),
+          apiFetchWithAuth(`${API_BASE_URL}/api/user/memory?limit=8`)
         ]);
         if (profileResponse.ok) {
           const profileData = (await profileResponse.json()) as { profile?: UserProfile };
@@ -1300,6 +1526,7 @@ export default function HomePage() {
   function commit(mutator: (draft: PlannerState) => void) {
     const draft = deepCloneState(state);
     mutator(draft);
+    draft.budgetMode = "C";
     const nextHistory = history.slice(0, historyIndex + 1);
     nextHistory.push(draft);
     setHistory(nextHistory);
@@ -1432,6 +1659,7 @@ export default function HomePage() {
     const assistantIndex = nextMessages.length;
 
     setChatError(null);
+    setChatDegraded(false);
     setChatLoading(true);
     setChatInput("");
     setRecommendedVideos([]);
@@ -1440,9 +1668,9 @@ export default function HomePage() {
 
     void (async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/chat`, {
+        const response = await apiFetchWithAuth(`${API_BASE_URL}/api/chat`, {
           method: "POST",
-          headers: getAuthHeaders({ "Content-Type": "application/json" }),
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             sessionId: chatSessionId,
             message: value,
@@ -1495,6 +1723,7 @@ export default function HomePage() {
                 done?: boolean;
                 error?: string;
                 recommended_videos?: RecommendedVideo[];
+                fallback?: boolean;
               };
               if (payload.error) {
                 throw new Error(payload.error);
@@ -1512,6 +1741,9 @@ export default function HomePage() {
               if (payload.recommended_videos) {
                 setRecommendedVideos(payload.recommended_videos.slice(0, 5));
               }
+              if (payload.fallback) {
+                setChatDegraded(true);
+              }
             } catch (error) {
               if (error instanceof Error) {
                 throw error;
@@ -1524,7 +1756,11 @@ export default function HomePage() {
         if (buffered.startsWith("data:")) {
           const payloadText = buffered.slice(5).trim();
           if (payloadText) {
-            const payload = JSON.parse(payloadText) as { token?: string; recommended_videos?: RecommendedVideo[] };
+            const payload = JSON.parse(payloadText) as {
+              token?: string;
+              recommended_videos?: RecommendedVideo[];
+              fallback?: boolean;
+            };
             if (payload.token) {
               setChatMessages((prev) =>
                 trimChatMessages(
@@ -1537,6 +1773,9 @@ export default function HomePage() {
             }
             if (payload.recommended_videos) {
               setRecommendedVideos(payload.recommended_videos.slice(0, 5));
+            }
+            if (payload.fallback) {
+              setChatDegraded(true);
             }
           }
         }
@@ -1556,6 +1795,9 @@ export default function HomePage() {
       } finally {
         streamingViaSseRef.current = false;
         setChatLoading(false);
+        if (autoMemorySync) {
+          void runAiMemoryReview();
+        }
       }
     })();
   }
@@ -1566,12 +1808,11 @@ export default function HomePage() {
     }
     setChatError(null);
     setChatMessages(INITIAL_CHAT_MESSAGES);
-    if (!authReady || chatSessionId === "session-anon") {
+    if (!authReady || !chatSessionId) {
       return;
     }
-    void fetch(`${API_BASE_URL}/api/chat/history/${encodeURIComponent(chatSessionId)}`, {
+    void apiFetchWithAuth(`${API_BASE_URL}/api/chat/history/${encodeURIComponent(chatSessionId)}`, {
       method: "DELETE",
-      headers: getAuthHeaders()
     });
   }
 
@@ -1605,40 +1846,6 @@ export default function HomePage() {
     }
   }
 
-  async function onSearchSegments(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const query = segmentQuery.trim();
-    if (!query || segmentLoading) {
-      return;
-    }
-    setSegmentError(null);
-    setSegmentLoading(true);
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/search-segments`, {
-        method: "POST",
-        headers: getAuthHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          query,
-          city: segmentCity.trim() || undefined,
-          limit: Math.max(1, Math.min(50, segmentLimit || 8))
-        })
-      });
-      if (!response.ok) {
-        const data = (await response.json().catch(() => ({}))) as { error?: string; detail?: string };
-        throw new Error(data.error || data.detail || "片段檢索失敗。");
-      }
-      const data = (await response.json()) as { mode?: string; items?: SegmentSearchItem[] };
-      setSegmentMode(data.mode || "");
-      setSegmentItems(data.items || []);
-    } catch (error) {
-      setSegmentItems([]);
-      setSegmentMode("");
-      setSegmentError(error instanceof Error ? error.message : "片段檢索失敗。");
-    } finally {
-      setSegmentLoading(false);
-    }
-  }
-
   function formatSeconds(sec: number): string {
     const total = Math.max(0, Math.floor(sec));
     const h = Math.floor(total / 3600);
@@ -1658,9 +1865,9 @@ export default function HomePage() {
     setProfileSaving(true);
     setChatError(null);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/user/profile`, {
+      const response = await apiFetchWithAuth(`${API_BASE_URL}/api/user/profile`, {
         method: "PUT",
-        headers: getAuthHeaders({ "Content-Type": "application/json" }),
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           displayName: profile.display_name ?? null,
           travelStyle: profile.travel_style ?? null,
@@ -1681,6 +1888,41 @@ export default function HomePage() {
       setChatError(error instanceof Error ? error.message : "偏好儲存失敗");
     } finally {
       setProfileSaving(false);
+    }
+  }
+
+  async function runAiMemoryReview() {
+    if (memoryReviewing || !authReady) {
+      return;
+    }
+    setMemoryReviewing(true);
+    setMemoryNotice(null);
+    setChatError(null);
+    try {
+      const rebuildResponse = await apiFetchWithAuth(`${API_BASE_URL}/api/user/memory/rebuild`, {
+        method: "POST",
+      });
+      if (!rebuildResponse.ok) {
+        const data = (await rebuildResponse.json().catch(() => ({}))) as { error?: string; detail?: string };
+        throw new Error(data.error || data.detail || "AI 記憶巡檢失敗");
+      }
+      const result = (await rebuildResponse.json()) as { inserted?: number; skipped?: number; candidates?: number };
+      const memoryResponse = await apiFetchWithAuth(`${API_BASE_URL}/api/user/memory?limit=8`);
+      if (memoryResponse.ok) {
+        const memoryData = (await memoryResponse.json()) as {
+          items?: Array<{ id: number; memory_text: string; memory_type: string }>;
+        };
+        setMemoryItems(memoryData.items || []);
+      }
+      setMemoryNotice(
+        `AI 巡檢完成：候選 ${result.candidates ?? 0} 筆，新增 ${result.inserted ?? 0} 筆，略過重複 ${
+          result.skipped ?? 0
+        } 筆。`
+      );
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "AI 記憶巡檢失敗");
+    } finally {
+      setMemoryReviewing(false);
     }
   }
 
@@ -1753,7 +1995,27 @@ export default function HomePage() {
               </button>
             </form>
             <div className="mt-2 rounded bg-slate-50 p-2">
-              <p className="mb-1 text-xs text-slate-500">近期記憶</p>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <p className="text-xs text-slate-500">近期記憶</p>
+                <button
+                  type="button"
+                  className="rounded border px-2 py-0.5 text-xs disabled:opacity-60"
+                  onClick={() => void runAiMemoryReview()}
+                  disabled={memoryReviewing || profileLoading}
+                >
+                  {memoryReviewing ? "巡檢中" : "AI 檢查偏好"}
+                </button>
+              </div>
+              <label className="mb-1 flex items-center gap-2 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={autoMemorySync}
+                  onChange={(event) => setAutoMemorySync(event.target.checked)}
+                  disabled={memoryReviewing}
+                />
+                每次送出訊息後自動巡檢長期偏好
+              </label>
+              {memoryNotice && <p className="mb-1 text-xs text-emerald-700">{memoryNotice}</p>}
               {memoryItems.length === 0 ? (
                 <p className="text-xs text-slate-500">尚無記憶資料。</p>
               ) : (
@@ -1761,91 +2023,6 @@ export default function HomePage() {
                   {memoryItems.map((item) => (
                     <li key={item.id} className="rounded border bg-white px-2 py-1">
                       [{item.memory_type}] {item.memory_text}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-          <div className="mb-2 rounded border border-slate-200 p-2 text-sm">
-            <p className="mb-2 font-medium">即時通訊狀態</p>
-            <div className="mb-2 flex items-center gap-2 text-xs">
-              <span className={`rounded px-2 py-1 ${wsConnected ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
-                {wsConnected ? "WebSocket 已連線" : "WebSocket 未連線"}
-              </span>
-            </div>
-            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-              <div className="rounded bg-slate-50 p-2">
-                <p className="mb-1 text-xs text-slate-500">stream_response 預覽</p>
-                <p className="text-xs text-slate-700">{wsStreamPreview || "尚無資料"}</p>
-              </div>
-              <div className="rounded bg-slate-50 p-2">
-                <p className="mb-1 text-xs text-slate-500">itinerary_update</p>
-                {wsItineraryEvents.length === 0 ? (
-                  <p className="text-xs text-slate-600">尚無更新</p>
-                ) : (
-                  <ul className="space-y-1 text-xs">
-                    {wsItineraryEvents.map((item, index) => (
-                      <li key={`${item.at}-${index}`}>
-                        {item.at} - {item.action}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="mb-2 rounded border border-slate-200 p-2 text-sm">
-            <p className="mb-2 font-medium">搜尋片段（測試）</p>
-            <form className="mb-2 grid grid-cols-1 gap-2 md:grid-cols-4" onSubmit={onSearchSegments}>
-              <input
-                className="rounded border px-2 py-1 md:col-span-2"
-                value={segmentQuery}
-                onChange={(event) => setSegmentQuery(event.target.value)}
-                placeholder="輸入關鍵字，例如 台南 夜景"
-                disabled={segmentLoading}
-              />
-              <input
-                className="rounded border px-2 py-1"
-                value={segmentCity}
-                onChange={(event) => setSegmentCity(event.target.value)}
-                placeholder="城市（選填）"
-                disabled={segmentLoading}
-              />
-              <div className="flex gap-2">
-                <input
-                  className="w-20 rounded border px-2 py-1"
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={segmentLimit}
-                  onChange={(event) => setSegmentLimit(Number(event.target.value) || 8)}
-                  disabled={segmentLoading}
-                />
-                <button className="rounded border px-3 py-1 disabled:opacity-60" type="submit" disabled={segmentLoading}>
-                  {segmentLoading ? "搜尋中" : "搜尋"}
-                </button>
-              </div>
-            </form>
-            {segmentError && <p className="mb-2 text-xs text-red-600">{segmentError}</p>}
-            {!segmentError && segmentItems.length > 0 && (
-              <p className="mb-2 text-xs text-slate-500">
-                模式：{segmentMode}，共 {segmentItems.length} 筆
-              </p>
-            )}
-            <div className="max-h-40 overflow-auto rounded bg-slate-50 p-2">
-              {segmentItems.length === 0 ? (
-                <p className="text-xs text-slate-500">尚無結果。</p>
-              ) : (
-                <ul className="space-y-2 text-xs">
-                  {segmentItems.map((item) => (
-                    <li key={item.id} className="rounded border bg-white p-2">
-                      <p className="font-medium">
-                        segment #{item.id} / video #{item.video_id} / {item.start_sec}-{item.end_sec}s
-                      </p>
-                      {typeof item.distance === "number" && <p>distance: {item.distance.toFixed(4)}</p>}
-                      <p>{item.summary || "(無摘要)"}</p>
                     </li>
                   ))}
                 </ul>
@@ -1889,6 +2066,11 @@ export default function HomePage() {
               </div>
             ))}
           </div>
+          {chatDegraded && (
+            <p className="mb-2 text-xs text-amber-700">
+              目前為短期記憶降級模式，長期偏好可能暫時未完整套用。
+            </p>
+          )}
           {chatError && <p className="mb-2 text-xs text-red-600">{chatError}</p>}
           <form className="flex gap-2" onSubmit={onSubmitChat}>
             <input
@@ -1979,10 +2161,18 @@ export default function HomePage() {
             <button
               className="rounded border px-2 py-1 text-sm"
               onClick={() => {
-                if (typeof window !== "undefined") {
-                  window.localStorage.removeItem("aiyo_token");
-                }
-                router.replace("/login");
+                void (async () => {
+                  try {
+                    await apiFetchWithAuth(`${API_BASE_URL}/api/auth/logout`, { method: "POST" }, false);
+                  } catch {
+                    // Ignore logout API failures and clear client state anyway.
+                  } finally {
+                    if (typeof window !== "undefined") {
+                      window.localStorage.removeItem("aiyo_token");
+                    }
+                    router.replace("/login");
+                  }
+                })();
               }}
             >
               登出
@@ -1997,15 +2187,7 @@ export default function HomePage() {
                 </option>
               ))}
             </select>
-            <select
-              className="rounded border px-2 py-1 text-sm"
-              value={state.budgetMode}
-              onChange={(event) => commit((draft) => void (draft.budgetMode = event.target.value as BudgetMode))}
-            >
-              <option value="A">預算模式 A：總預算與花費追蹤</option>
-              <option value="B">預算模式 B：景點預估花費</option>
-              <option value="C">預算模式 C：全部啟用</option>
-            </select>
+            <span className="rounded bg-slate-100 px-2 py-1 text-sm text-slate-700">預算模式 C：全部啟用</span>
             <button
               className="rounded border px-3 py-1 text-sm disabled:opacity-40"
               disabled={historyIndex === 0}
@@ -2284,6 +2466,7 @@ export default function HomePage() {
               <div className="flex min-w-0 flex-1 items-center rounded border bg-white px-2">
                 <span className="pr-2 text-slate-500">搜尋</span>
                 <input
+                  ref={searchInputRef}
                   className="min-w-0 flex-1 border-0 px-0 py-1 outline-none"
                   placeholder="輸入地點名稱或地址"
                   value={searchText}

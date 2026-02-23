@@ -37,18 +37,20 @@ export default function LoginPage() {
       const endpoint = mode === "login" ? "/api/auth/login" : "/api/auth/register";
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: email.trim(),
           password
         })
       });
-      const data = (await response.json().catch(() => ({}))) as { token?: string; error?: string };
-      if (!response.ok || !data.token) {
+      const data = (await response.json().catch(() => ({}))) as { token?: string; access_token?: string; error?: string };
+      const token = data.access_token || data.token || "";
+      if (!response.ok || !token) {
         throw new Error(data.error || "登入失敗。");
       }
       if (typeof window !== "undefined") {
-        window.localStorage.setItem("aiyo_token", data.token);
+        window.localStorage.setItem("aiyo_token", token);
       }
       router.replace("/");
     } catch (e) {

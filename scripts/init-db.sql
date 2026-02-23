@@ -131,6 +131,16 @@ CREATE TABLE IF NOT EXISTS user_profiles (
   updated_at TIMESTAMP DEFAULT NOW()
 );
 
+-- user_preferences（結構化長期偏好 + 向量檢索）
+CREATE TABLE IF NOT EXISTS user_preferences (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  preferences_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  embedding_vector vector(768),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id)
+);
+
 -- user_memories（記憶事實）
 CREATE TABLE IF NOT EXISTS user_memories (
   id SERIAL PRIMARY KEY,
@@ -165,9 +175,33 @@ ALTER TABLE itineraries ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES user
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_user_memories_user_id ON user_memories(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_preferences_updated_at ON user_preferences(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_preferences_embedding ON user_preferences
+  USING hnsw (embedding_vector vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64)
+  WHERE embedding_vector IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_id ON chat_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id ON chat_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_itineraries_user_id ON itineraries(user_id);
+
+ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_preferences FORCE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'user_preferences'
+      AND policyname = 'user_isolation'
+  ) THEN
+    CREATE POLICY user_isolation
+      ON user_preferences
+      USING (user_id = NULLIF(current_setting('app.user_id', true), '')::INT)
+      WITH CHECK (user_id = NULLIF(current_setting('app.user_id', true), '')::INT);
+  END IF;
+END $$;
 
 -- video_processing_cache（避免重複處理相同影片）
 CREATE TABLE IF NOT EXISTS video_processing_cache (

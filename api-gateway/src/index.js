@@ -2,23 +2,122 @@ import cors from "cors";
 import express from "express";
 import http from "http";
 import morgan from "morgan";
+import * as Sentry from "@sentry/node";
+import client from "prom-client";
 import { WebSocketServer } from "ws";
 import { config } from "./config.js";
 import { pool } from "./db.js";
-import { cacheGet, cacheSet, initializeCache } from "./chatMemory.js";
-import { hashPassword, readBearerToken, requireAuth, signToken, verifyPassword, verifyToken } from "./auth.js";
+import { cacheGet, cacheSet, getSessionHistory, initializeCache, setSessionHistory } from "./chatMemory.js";
+import {
+  hashPassword,
+  readBearerToken,
+  requireAuth,
+  signRefreshToken,
+  signToken,
+  verifyPassword,
+  verifyRefreshToken,
+  verifyToken
+} from "./auth.js";
 
 const app = express();
 const server = http.createServer(app);
-app.use(cors());
+app.use(
+  cors({
+    origin: true,
+    credentials: true
+  })
+);
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("dev"));
 
+if (config.sentryDsn) {
+  Sentry.init({
+    dsn: config.sentryDsn,
+    tracesSampleRate: 0.1
+  });
+}
+
+const metricsRegistry = new client.Registry();
+client.collectDefaultMetrics({ register: metricsRegistry });
+const requestDuration = new client.Histogram({
+  name: "gateway_http_request_duration_ms",
+  help: "HTTP request duration in milliseconds",
+  labelNames: ["method", "route", "status_code"],
+  buckets: [30, 50, 100, 200, 300, 500, 800, 1200, 2000],
+  registers: [metricsRegistry]
+});
+
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on("finish", () => {
+    const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+    requestDuration.observe(
+      {
+        method: req.method,
+        route: req.route?.path || req.path || "unknown",
+        status_code: String(res.statusCode)
+      },
+      durationMs
+    );
+  });
+  next();
+});
+
 const wss = new WebSocketServer({ noServer: true });
 const sessionClients = new Map();
+const ACCESS_TOKEN_SKEW_SEC = 20;
+
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+  const pairs = String(header).split(";").map((item) => item.trim()).filter(Boolean);
+  const result = {};
+  for (const item of pairs) {
+    const idx = item.indexOf("=");
+    if (idx < 0) continue;
+    const key = item.slice(0, idx).trim();
+    const value = item.slice(idx + 1).trim();
+    result[key] = decodeURIComponent(value);
+  }
+  return result;
+}
+
+function setRefreshTokenCookie(res, refreshToken) {
+  const secure = process.env.NODE_ENV === "production";
+  const parts = [
+    `${config.refreshCookieName}=${encodeURIComponent(refreshToken)}`,
+    "HttpOnly",
+    "Path=/",
+    "SameSite=Lax",
+    `Max-Age=${60 * 60 * 24 * 30}`
+  ];
+  if (secure) {
+    parts.push("Secure");
+  }
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function clearRefreshTokenCookie(res) {
+  const secure = process.env.NODE_ENV === "production";
+  const parts = [
+    `${config.refreshCookieName}=`,
+    "HttpOnly",
+    "Path=/",
+    "SameSite=Lax",
+    "Max-Age=0"
+  ];
+  if (secure) {
+    parts.push("Secure");
+  }
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "api-gateway" });
+});
+
+app.get("/metrics", async (_req, res) => {
+  res.setHeader("Content-Type", metricsRegistry.contentType);
+  res.send(await metricsRegistry.metrics());
 });
 
 app.get("/api/models", async (_req, res) => {
@@ -70,7 +169,15 @@ app.post("/api/auth/register", async (req, res) => {
   );
   await pool.query("INSERT INTO user_profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", [result.rows[0].id]);
   const token = signToken(result.rows[0]);
-  res.status(201).json({ token, user: result.rows[0] });
+  const refreshToken = signRefreshToken(result.rows[0]);
+  setRefreshTokenCookie(res, refreshToken);
+  res.status(201).json({
+    token,
+    access_token: token,
+    token_type: "Bearer",
+    expires_in: 15 * 60 - ACCESS_TOKEN_SKEW_SEC,
+    user: result.rows[0]
+  });
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -93,14 +200,50 @@ app.post("/api/auth/login", async (req, res) => {
   }
   await pool.query("UPDATE users SET last_login_at = NOW() WHERE id = $1", [user.id]);
   const token = signToken(user);
+  const refreshToken = signRefreshToken(user);
+  setRefreshTokenCookie(res, refreshToken);
   res.json({
     token,
+    access_token: token,
+    token_type: "Bearer",
+    expires_in: 15 * 60 - ACCESS_TOKEN_SKEW_SEC,
     user: {
       id: user.id,
       email: user.email,
       created_at: user.created_at
     }
   });
+});
+
+app.post("/api/auth/refresh", async (req, res) => {
+  try {
+    const cookies = parseCookies(req);
+    const refreshToken = cookies[config.refreshCookieName];
+    if (!refreshToken) {
+      res.status(401).json({ error: "missing refresh token" });
+      return;
+    }
+    const payload = verifyRefreshToken(refreshToken);
+    const userResult = await pool.query("SELECT id, email, created_at FROM users WHERE id = $1", [Number(payload.sub)]);
+    const user = userResult.rows[0];
+    if (!user) {
+      clearRefreshTokenCookie(res);
+      res.status(401).json({ error: "invalid refresh token" });
+      return;
+    }
+    const token = signToken(user);
+    const nextRefreshToken = signRefreshToken(user);
+    setRefreshTokenCookie(res, nextRefreshToken);
+    res.json({
+      token,
+      access_token: token,
+      token_type: "Bearer",
+      expires_in: 15 * 60 - ACCESS_TOKEN_SKEW_SEC
+    });
+  } catch {
+    clearRefreshTokenCookie(res);
+    res.status(401).json({ error: "invalid refresh token" });
+  }
 });
 
 app.get("/api/auth/me", requireAuth, async (req, res) => {
@@ -121,6 +264,7 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/logout", requireAuth, (_req, res) => {
+  clearRefreshTokenCookie(res);
   res.json({ ok: true });
 });
 
@@ -207,6 +351,18 @@ app.post("/api/user/memory", requireAuth, async (req, res) => {
   res.status(201).json({ item: result.rows[0] });
 });
 
+app.post("/api/user/memory/rebuild", requireAuth, async (req, res) => {
+  try {
+    const result = await saveAiReviewedMemories(req.user.id);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(502).json({
+      error: "AI 記憶巡檢失敗",
+      detail: error instanceof Error ? error.message : "unknown error"
+    });
+  }
+});
+
 app.get("/api/chat/sessions", requireAuth, async (req, res) => {
   const result = await pool.query(
     `
@@ -271,24 +427,62 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   const body = req.body || {};
   const sessionId = body.sessionId || `user-${req.user.id}`;
   const chatSessionDbId = await ensureChatSession(req.user.id, sessionId);
+  const incomingMessages = normalizeChatMessages(body.messages);
+  const cachedHistory = await getSessionHistory(sessionId);
+  let mergedHistory = normalizeChatMessages([...cachedHistory, ...incomingMessages]);
   if (sessionId && body.message) {
-    await saveExtractedMemories(req.user.id, String(body.message));
-    await saveChatMessage(chatSessionDbId, "user", String(body.message), {});
+    if (config.enableGatewayMemoryExtract) {
+      await saveExtractedMemories(req.user.id, String(body.message));
+    }
+    const userText = String(body.message);
+    await saveChatMessage(chatSessionDbId, "user", userText, {});
+    mergedHistory = normalizeChatMessages([...mergedHistory, { role: "user", content: userText }]);
+    await setSessionHistory(sessionId, mergedHistory, 3600);
   }
 
   const response = await fetch(`${config.aiServiceUrl}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
+    },
     body: JSON.stringify({
       ...body,
+      messages: mergedHistory,
       session_id: sessionId,
       user_id: req.user.id
     })
   });
 
   if (!response.ok || !response.body) {
-    const text = await response.text().catch(() => "");
-    res.status(502).json({ error: "ai-service unavailable", detail: text });
+    const fallbackReply = buildFallbackReply(body.message);
+    const fallbackHistory = normalizeChatMessages([...mergedHistory, { role: "assistant", content: fallbackReply }]);
+    await saveChatMessage(chatSessionDbId, "assistant", fallbackReply, {
+      recommended_videos: [],
+      fallback: true
+    });
+    await setSessionHistory(sessionId, fallbackHistory, 3600);
+    if (body.stream === false) {
+      res.json({
+        reply: fallbackReply,
+        recommended_videos: [],
+        fallback: true
+      });
+      return;
+    }
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.write(`data: ${JSON.stringify({ token: fallbackReply }, null, 0)}\n\n`);
+    res.write(`data: ${JSON.stringify({ done: true, recommended_videos: [], fallback: true }, null, 0)}\n\n`);
+    if (sessionId) {
+      broadcastToSession(sessionId, {
+        type: "stream_response",
+        sessionId,
+        chunk: `data: ${JSON.stringify({ token: fallbackReply })}\n\ndata: ${JSON.stringify({ done: true, recommended_videos: [], fallback: true })}\n\n`
+      });
+    }
+    res.end();
     return;
   }
 
@@ -299,6 +493,11 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       await saveChatMessage(chatSessionDbId, "assistant", String(data.reply), {
         recommended_videos: data.recommended_videos ?? []
       });
+      await setSessionHistory(
+        sessionId,
+        normalizeChatMessages([...mergedHistory, { role: "assistant", content: String(data.reply) }]),
+        3600
+      );
     }
     res.json(data);
     return;
@@ -337,6 +536,11 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       await saveChatMessage(chatSessionDbId, "assistant", assistantText, {
         recommended_videos: recommendedVideos
       });
+      await setSessionHistory(
+        sessionId,
+        normalizeChatMessages([...mergedHistory, { role: "assistant", content: assistantText }]),
+        3600
+      );
     }
     res.end();
   }
@@ -353,7 +557,10 @@ app.post("/api/search-segments", requireAuth, async (req, res) => {
 
   const response = await fetch(`${config.aiServiceUrl}/api/tools/search-segments`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
+    },
     body: JSON.stringify(payload)
   });
   const data = await response.json().catch(() => ({}));
@@ -466,25 +673,237 @@ function extractTokenText(chunk) {
   return text;
 }
 
+function normalizePersonName(rawName) {
+  const value = String(rawName || "")
+    .trim()
+    .replace(/^[「『"'\s]+|[」』"'\s]+$/g, "")
+    .replace(/[，。！？,.。!?]+$/g, "");
+  if (!value) {
+    return "";
+  }
+  const blocked = new Set([
+    "誰",
+    "你",
+    "我",
+    "他",
+    "她",
+    "它",
+    "您",
+    "名字",
+    "姓名",
+    "稱呼",
+    "暱稱",
+    "本人"
+  ]);
+  if (blocked.has(value) || value.length > 20) {
+    return "";
+  }
+  return value;
+}
+
 function extractMemoriesFromMessage(message) {
   const text = String(message || "").trim();
   if (!text) {
     return [];
   }
   const memories = [];
-  if (text.includes("我喜歡")) {
-    memories.push({ memoryType: "preference", memoryText: text, confidence: 0.85, source: "chat" });
+
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const pushMemory = (memoryType, memoryText, confidence, source = "chat_auto_long") => {
+    const cleaned = String(memoryText || "").replace(/\s+/g, " ").trim();
+    if (!cleaned || cleaned.length < 2) {
+      return;
+    }
+    memories.push({ memoryType, memoryText: cleaned.slice(0, 300), confidence, source });
+  };
+
+  const nameMatch = normalized.match(/(?:我叫|我是)\s*([^\s，。！？,.]{1,20})/);
+  const normalizedName = normalizePersonName(nameMatch?.[1] || "");
+  if (normalizedName) {
+    pushMemory("identity", `使用者姓名或稱呼：${normalizedName}`, 0.93);
   }
-  if (text.includes("我不吃") || text.includes("不要")) {
-    memories.push({ memoryType: "constraint", memoryText: text, confidence: 0.9, source: "chat" });
+
+  const visitedPatterns = [/我(?:之前)?去過([^，。！？,.]{1,25})/, /我曾去過([^，。！？,.]{1,25})/, /我玩過([^，。！？,.]{1,25})/];
+  for (const pattern of visitedPatterns) {
+    const match = normalized.match(pattern);
+    if (match?.[1]) {
+      pushMemory("visited_place", `使用者去過：${match[1].trim()}`, 0.88);
+      break;
+    }
   }
-  if (text.includes("預算")) {
-    memories.push({ memoryType: "budget", memoryText: text, confidence: 0.8, source: "chat" });
+
+  if (/(我喜歡|偏好|我通常|我習慣|我想要)/.test(normalized)) {
+    pushMemory("preference", normalized, 0.86);
   }
-  if (text.includes("節奏") || text.includes("行程")) {
-    memories.push({ memoryType: "pace", memoryText: text, confidence: 0.75, source: "chat" });
+  if (/(我不吃|過敏|不要|不想|避免)/.test(normalized)) {
+    pushMemory("constraint", normalized, 0.9);
   }
-  return memories.slice(0, 3);
+  if (/(預算|花費|省錢|高預算|低預算)/.test(normalized)) {
+    pushMemory("budget", normalized, 0.82);
+  }
+  if (/(節奏|行程|慢慢|緊湊|鬆一點|快一點)/.test(normalized)) {
+    pushMemory("pace", normalized, 0.78);
+  }
+  if (/(交通|開車|大眾運輸|捷運|公車|步行|騎車)/.test(normalized)) {
+    pushMemory("transport", normalized, 0.78);
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const item of memories) {
+    const key = `${item.memoryType}:${item.memoryText}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+  return unique.slice(0, 5);
+}
+
+function parseJsonArrayFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return [];
+  }
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenced?.[1] || raw;
+  try {
+    const parsed = JSON.parse(candidate);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    const firstBracket = candidate.indexOf("[");
+    const lastBracket = candidate.lastIndexOf("]");
+    if (firstBracket >= 0 && lastBracket > firstBracket) {
+      const sliced = candidate.slice(firstBracket, lastBracket + 1);
+      try {
+        const parsed = JSON.parse(sliced);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+}
+
+function sanitizeAiMemoryItem(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  const memoryType = String(item.memoryType || "").trim().toLowerCase();
+  const allowedTypes = new Set(["identity", "preference", "constraint", "budget", "pace", "transport", "visited_place"]);
+  if (!allowedTypes.has(memoryType)) {
+    return null;
+  }
+  let memoryText = String(item.memoryText || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+  if (!memoryText) {
+    return null;
+  }
+
+  if (memoryType === "identity") {
+    const nameFromText = memoryText.startsWith("使用者姓名或稱呼：")
+      ? memoryText.slice("使用者姓名或稱呼：".length)
+      : memoryText;
+    const normalizedName = normalizePersonName(nameFromText);
+    if (!normalizedName) {
+      return null;
+    }
+    memoryText = `使用者姓名或稱呼：${normalizedName}`;
+  }
+
+  const confidenceValue = Number(item.confidence);
+  const confidence = Number.isFinite(confidenceValue) ? Math.max(0.5, Math.min(0.99, confidenceValue)) : 0.8;
+  return {
+    memoryType,
+    memoryText,
+    confidence,
+    source: "chat_ai_review"
+  };
+}
+
+async function extractMemoriesByAiReview(userId) {
+  const messageRows = await pool.query(
+    `
+    SELECT m.role, m.content, m.created_at
+    FROM chat_messages m
+    JOIN chat_sessions s ON s.id = m.session_id
+    WHERE s.user_id = $1
+    ORDER BY m.created_at DESC
+    LIMIT 80
+    `,
+    [userId]
+  );
+  if (!messageRows.rows.length) {
+    return [];
+  }
+
+  const memoryRows = await pool.query(
+    `
+    SELECT memory_type, memory_text, confidence
+    FROM user_memories
+    WHERE user_id = $1
+    ORDER BY created_at DESC
+    LIMIT 25
+    `,
+    [userId]
+  );
+
+  const dialogueText = messageRows.rows
+    .slice()
+    .reverse()
+    .map((row, index) => `${index + 1}. [${row.role}] ${String(row.content || "").replace(/\s+/g, " ").slice(0, 260)}`)
+    .join("\n");
+  const existingMemoryText = memoryRows.rows
+    .map(
+      (row, index) =>
+        `${index + 1}. [${row.memory_type}] ${row.memory_text} (confidence=${row.confidence})`
+    )
+    .join("\n");
+
+  const systemPrompt =
+    "你是記憶萃取器。請根據對話內容抽取可長期保留的使用者事實。僅回傳 JSON 陣列，不要任何額外文字。";
+  const userPrompt = `
+請從以下資料萃取「值得長期記錄」的記憶，並輸出 JSON 陣列。
+每個元素格式必須是：
+{"memoryType":"identity|preference|constraint|budget|pace|transport|visited_place","memoryText":"...", "confidence":0.5~0.99}
+
+規則：
+1) 僅抽取由使用者明確表達或高可信推論的內容。
+2) memoryText 要簡潔、可重用，避免整段複製。
+3) identity 僅在姓名明確時才輸出，且格式固定為「使用者姓名或稱呼：XXX」。
+4) 不要輸出「誰、你、我、姓名、名字」這類非姓名值。
+5) 若沒有可新增內容，回傳空陣列 []。
+
+[近期對話]
+${dialogueText}
+
+[既有記憶]
+${existingMemoryText || "（無）"}
+`.trim();
+
+  const response = await fetch(`${config.ollamaBaseUrl}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: config.ollamaModel,
+      stream: false,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ]
+    })
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`memory ai review failed: ${response.status} ${text}`);
+  }
+  const data = await response.json();
+  const content = data?.message?.content || "";
+  const parsedItems = parseJsonArrayFromText(content);
+  return parsedItems.map(sanitizeAiMemoryItem).filter(Boolean).slice(0, 12);
 }
 
 async function saveExtractedMemories(userId, message) {
@@ -493,6 +912,18 @@ async function saveExtractedMemories(userId, message) {
     return;
   }
   for (const item of memories) {
+    const exists = await pool.query(
+      `
+      SELECT id
+      FROM user_memories
+      WHERE user_id = $1 AND memory_type = $2 AND memory_text = $3
+      LIMIT 1
+      `,
+      [userId, item.memoryType, item.memoryText]
+    );
+    if (exists.rows[0]) {
+      continue;
+    }
     await pool.query(
       `
       INSERT INTO user_memories (user_id, memory_type, memory_text, confidence, source)
@@ -501,6 +932,50 @@ async function saveExtractedMemories(userId, message) {
       [userId, item.memoryType, item.memoryText, item.confidence, item.source]
     );
   }
+}
+
+async function saveAiReviewedMemories(userId) {
+  await pool.query(
+    `
+    DELETE FROM user_memories
+    WHERE user_id = $1
+      AND memory_type = 'identity'
+      AND memory_text IN ('使用者姓名或稱呼：誰', '使用者姓名或稱呼：你', '使用者姓名或稱呼：我')
+    `,
+    [userId]
+  );
+
+  const candidates = await extractMemoriesByAiReview(userId);
+  let inserted = 0;
+  let skipped = 0;
+  for (const item of candidates) {
+    const exists = await pool.query(
+      `
+      SELECT id
+      FROM user_memories
+      WHERE user_id = $1 AND memory_type = $2 AND memory_text = $3
+      LIMIT 1
+      `,
+      [userId, item.memoryType, item.memoryText]
+    );
+    if (exists.rows[0]) {
+      skipped += 1;
+      continue;
+    }
+    await pool.query(
+      `
+      INSERT INTO user_memories (user_id, memory_type, memory_text, confidence, source)
+      VALUES ($1, $2, $3, $4, $5)
+      `,
+      [userId, item.memoryType, item.memoryText, item.confidence, item.source]
+    );
+    inserted += 1;
+  }
+  return {
+    inserted,
+    skipped,
+    candidates: candidates.length
+  };
 }
 
 async function ensureChatSession(userId, externalSessionId) {
@@ -570,6 +1045,25 @@ function mergeRecommendedVideos(current, incoming) {
     }
   }
   return Array.from(map.values()).slice(0, 5);
+}
+
+function normalizeChatMessages(messages) {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+  return messages
+    .map((item) => ({
+      role: item?.role === "assistant" || item?.role === "system" ? item.role : "user",
+      content: String(item?.content || "").trim()
+    }))
+    .filter((item) => item.content.length > 0)
+    .slice(-50);
+}
+
+function buildFallbackReply(lastUserMessage) {
+  const text = String(lastUserMessage || "").trim();
+  const head = text ? `你剛剛提到：「${text.slice(0, 80)}」。` : "我收到你的需求了。";
+  return `${head}目前個人化模型服務暫時不可用，我先以短期對話內容提供建議。請稍後再試一次，系統恢復後會自動帶入長期偏好。`;
 }
 
 function parseWsMessage(raw) {
