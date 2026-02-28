@@ -104,6 +104,40 @@ AIYO 愛遊是一個互動式旅遊網站，提供以下核心功能：
 
 ---
 
+## MVP 部署準備
+
+### 1) 先檢查環境變數（必填與占位值）
+
+```bash
+node scripts/deploy/validate_env.mjs --target=all
+```
+
+可針對單一服務檢查：
+
+```bash
+node scripts/deploy/validate_env.mjs --target=ai
+node scripts/deploy/validate_env.mjs --target=gateway
+node scripts/deploy/validate_env.mjs --target=frontend
+```
+
+### 2) 部署前先獨立執行 migration
+
+```bash
+cd api-gateway
+npm run migrate:dry-run
+npm run migrate:deploy
+```
+
+### 3) 建立部署映像（可選）
+
+```bash
+docker build -t aiyo-ai-service ./ai-service
+docker build -t aiyo-api-gateway ./api-gateway
+docker build -t aiyo-frontend ./frontend
+```
+
+---
+
 ## 專案特色
 
 ### 1. 語音優先設計

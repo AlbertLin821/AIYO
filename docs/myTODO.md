@@ -2,8 +2,8 @@
 
 依 [開發路線圖.md](./開發路線圖.md) 與專案規格整理之整體待辦，供團隊追蹤進度。
 
-**文件版本**：2.1  
-**更新日期**：2026-02-21
+**文件版本**：3.0  
+**更新日期**：2026-02-28
 
 ---
 
@@ -16,6 +16,7 @@
 | 開發路線圖 | 1.0 | [開發路線圖.md](./開發路線圖.md) |
 | 系統需求規格書 | 1.0 | [系統需求規格書.md](./系統需求規格書.md) |
 | 使用者需求規格書 | - | [使用者需求規格書.md](./使用者需求規格書.md) |
+| 8 週個人化優先規劃 | 1.0 | .cursor/plans/aiyo-8週個人化優先規劃_e09871ef.plan.md |
 
 ---
 
@@ -25,27 +26,27 @@
 
 ### API 金鑰與服務啟用
 
-- [ ] Google Cloud 專案建立
-- [ ] YouTube Data API v3 啟用並取得金鑰
-- [ ] Google Maps：Places API、Directions API、Distance Matrix API 啟用
-- [ ] Google Maps API 金鑰取得（可與 YouTube 共用或分開）
-- [ ] （選用）OpenAI API 金鑰（若使用 Whisper API 而非本地 Whisper）
+- [x] Google Cloud 專案建立
+- [x] YouTube Data API v3 啟用並取得金鑰
+- [x] Google Maps：Places API、Directions API、Distance Matrix API 啟用
+- [x] Google Maps API 金鑰取得（可與 YouTube 共用或分開）
+- [x] （選用）OpenAI API 金鑰（若使用 Whisper API 而非本地 Whisper）
 
 ### API 配額與成本追蹤
 
 依據：YouTube Data API 預設每日 10,000 units（Pacific Time 午夜重置）；search.list 每次 100 units。詳見 [Quota Calculator](https://developers.google.com/youtube/v3/determine_quota_cost)。
 
-- [ ] 在 Google Cloud Console 建立配額監控（Quotas 頁面）
-- [ ] 確認 search.list 若 maxResults=50，每頁 100 units；索引 50 支影片約 100–200 units
-- [ ] （建議）設定配額達 80% 時的提醒
+- [x] 在 Google Cloud Console 建立配額監控（Quotas 頁面）
+- [x] 確認 search.list 若 maxResults=50，每頁 100 units；索引 50 支影片約 100-200 units
+- [x] （建議）設定配額達 80% 時的提醒
 
 ### 環境變數配置
 
-- [ ] 複製 `.env.example` 為 `.env`
-- [ ] 填入 `YOUTUBE_API_KEY`
-- [ ] 填入 `GOOGLE_MAPS_API_KEY`
-- [ ] 填入 `DATABASE_URL`、`REDIS_URL`（或沿用 Docker 預設）
-- [ ] 填入 `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（或沿用預設）
+- [x] 複製 `.env.example` 為 `.env`
+- [x] 填入 `YOUTUBE_API_KEY`
+- [x] 填入 `GOOGLE_MAPS_API_KEY`
+- [x] 填入 `DATABASE_URL`、`REDIS_URL`（或沿用 Docker 預設）
+- [x] 填入 `OLLAMA_BASE_URL`、`OLLAMA_MODEL`（或沿用預設）
 
 ### Docker 環境
 
@@ -56,9 +57,9 @@
 ### 開發環境建置
 
 - [x] video-indexer：建立 `.venv`、`pip install -r requirements.txt`
-- [ ] ai-service：建立 `.venv`、安裝依賴
+- [x] ai-service：建立 `.venv`、安裝依賴
 - [x] frontend：專案已建立，`npm install` 完成
-- [ ] api-gateway：`npm install`（專案建立後）
+- [x] api-gateway：`npm install` 完成
 
 ### 參考文件
 
@@ -96,8 +97,6 @@
 
 ### 4. Embedding 與語意分段
 
-依據：paraphrase-multilingual-MiniLM-L12-v2 輸出維度 384；sentence-transformers 的 `encode()` 支援 `batch_size`，不同 batch_size 可能產生不同結果，應固定使用同一值。
-
 - [x] 載入 sentence-transformers（paraphrase-multilingual-MiniLM-L12-v2）
 - [x] 對字幕句子產生 embedding，使用 `encode(..., batch_size=32)` 固定（semantic_segment.py）
 - [x] 處理完即釋放原文，不儲存
@@ -112,8 +111,6 @@
 - [x] 產出片段 tags：景點名稱、類型（美食/親子/室內/室外等）
 
 ### 6. 資料寫入與索引
-
-依據：`scripts/init-db.sql` 已建立 HNSW 向量索引；`scripts/migrations/001_initial_schema.sql` 已補上向量索引，與 init-db 一致。
 
 - [x] 寫入 `videos`（search_youtube.py：youtube_id、title、channel 等）
 - [x] 寫入 `segments`（index_video.py：時間戳、summary、tags、embedding_vector）
@@ -145,42 +142,49 @@
 #### 2a.1 專案架構
 
 - [x] 建立 ai-service 專案結構與 requirements.txt
-- [x] 實作 `POST /api/chat`（已支援 LLM 串流；RAG/Tool-calling 待補）
+- [x] 實作 `POST /api/chat`（已支援 LLM 串流；RAG/Tool-calling 已串接）
 - [x] 實作 `GET /api/videos`、`GET /api/videos/:id/segments`、`GET /api/segments/:id`
-- [x] 實作 `plan_itinerary` Tool：依 segments、days、preferences 產出行程 JSON，回傳給呼叫端（MVP）
+- [x] 實作 `plan_itinerary` Tool：已升級為約束感知版 v2（預算/節奏/交通/必去/避開）
 - [x] 啟用 Swagger / OpenAPI 文件（FastAPI `/docs`）
 
 #### 2a.2 Ollama 整合
 
-依據：[Ollama Errors](https://docs.ollama.com/api/errors)、[Addressing Timeout Issues in Ollama](https://www.arsturn.com/blog/addressing-timeout-issues-in-ollama)。Ollama 無內建 retry，需在應用層實作。
-
-- [ ] 連線 Ollama（base_url、model）
-- [ ] 設定 `request_timeout`（建議 60 秒，大模型或慢速環境可加長）
-- [ ] 實作 chat completions 呼叫
-- [ ] 實作重試：對 429/5xx/連線失敗使用 exponential backoff（最多 3 次）
-- [ ] 測試串流回應
-- [ ] 驗證中文與 JSON 輸出
+- [x] 連線 Ollama（base_url、model，見 main.py OLLAMA_BASE_URL/OLLAMA_MODEL）
+- [x] 設定 `request_timeout`（httpx.Timeout 90 秒）
+- [x] 實作 chat completions 呼叫（/api/chat 完整串流）
+- [x] 實作重試：工具呼叫已加入 `_execute_with_retry()`，最多 2 次重試含指數退避
+- [x] 測試串流回應（SSE event stream 已驗證）
+- [x] 驗證中文與 JSON 輸出（偏好抽取使用 format: json）
 
 #### 2a.3 RAG 實作
 
-- [ ] 使用與 video-indexer 相同 Embedding 模型（paraphrase-multilingual-MiniLM-L12-v2，384 維）
+- [x] 使用 Ollama embed API（nomic-embed-text）做查詢向量化
 - [x] Query 轉向量後在 pgvector 搜尋 segments（使用 HNSW 索引；`/api/tools/search-segments`）
-- [x] 整合搜尋結果為 context 傳給 LLM（`/api/chat` 已串接 RAG 第一版）
+- [x] 整合搜尋結果為 context 傳給 LLM（`/api/chat` 已串接 RAG）
 - [x] 產生自然語言回覆（基於 RAG context + Ollama）
 
 #### 2a.4 Tool-calling
 
-- [ ] 定義 `search_segments`、`plan_itinerary` 工具 schema
+- [x] 定義工具 schema：get_current_time、get_weather、search_youtube_videos、search_travel_information、search_transport_options（agent.py get_tool_schemas）
 - [x] 實作 `search_segments`：依 query、city、limit 查 pgvector（含文字降級）
-- [x] 實作 `plan_itinerary`：依 segments、days、preferences 產出行程 JSON（MVP）
-- [ ] 處理 tool call 回傳並二次呼叫 LLM 取得最終回覆
+- [x] 實作 `plan_itinerary`：升級為 v2 約束引擎（planner.py）
+- [x] 處理 tool call 回傳並二次呼叫 LLM 取得最終回覆（resolve_tool_context 多輪迴圈）
+- [x] 天氣查詢保底機制：模型未呼叫工具時自動強制查詢（should_force_weather_tool）
+- [x] 工具參數地點讀取：支援 location/city/region/place/area 及巢狀物件
 
 #### 2a.5 四大模組
 
-- [ ] Tool-usage：解析與執行 tool call 邏輯
-- [ ] Recommendation：依 RAG 結果排序與篩選
-- [ ] Planning：呼叫 Google Maps（Directions、Distance Matrix）優化順序；建議實作重試與逾時
+- [x] Tool-usage：完整工具呼叫執行迴圈 + 重試（agent.py resolve_tool_context + _execute_with_retry）
+- [x] Recommendation：統一重排引擎 v1（reranker.py），含城市/關鍵字/預算/節奏/約束/新鮮度計分 + 推薦理由
+- [x] Planning：約束引擎 v2（planner.py），含 Haversine 距離/交通時間估算/預算檢查/時段衝突/必去/避開
 - [x] Memory：Redis 儲存/讀取 session 最近 N 則訊息（api-gateway，失效時回退記憶體）
+
+#### 2a.6 個人化特徵層（新增）
+
+- [x] 統一個人化模組 `personalization.py`：UserFeatures dataclass 整合 user_profiles + user_memories + user_preferences + user_ai_settings
+- [x] `merge_user_features()` 合併四張表為統一特徵介面
+- [x] `features_to_keywords()` / `features_to_scoring_context()` / `features_to_system_context()` 供推薦、規劃、對話共用
+- [x] `build_user_features()` 在 main.py 可一次取得完整使用者特徵
 
 ### 2b. api-gateway（Node.js + Express）
 
@@ -188,10 +192,12 @@
 - [x] 實作 `GET /api/chat/history/:sessionId`、`DELETE /api/chat/history/:sessionId`（Redis 優先，失效回退記憶體）
 - [x] 實作 `POST /api/itinerary`、`GET /api/itinerary/:id`、`PUT /api/itinerary/:id`、`DELETE /api/itinerary/:id`（寫入 itineraries 等表）
 - [x] 實作 WebSocket：`message`、`stream_response`、`itinerary_update`（基礎通道：`/ws`）
-- [x] 對接 ai-service（已轉發 chat；RAG、行程規劃轉發待補）
+- [x] 對接 ai-service（chat 轉發、search-segments 轉發）
 - [x] chat history 正式改為 DB（`chat_sessions`、`chat_messages`），Redis 保留快取用途
+- [x] 推薦事件追蹤 API：`POST /api/recommendation/event`、`GET /api/recommendation/metrics`
+- [x] 品質儀表板 API：`GET /api/dev/quality-dashboard`
 
-### 2d. 帳號、主畫面與個人化（MVP）
+### 2c. 帳號、主畫面與個人化（MVP）
 
 - [x] 建立 `users`、`user_profiles`、`user_memories`、`chat_sessions`、`chat_messages` schema
 - [x] 實作 Email/密碼註冊與登入（JWT）
@@ -199,31 +205,33 @@
 - [x] 將 chat/history/itinerary 與 `user_id` 關聯（保留 session 相容）
 - [x] 新對話與新安排行程前載入使用者偏好與記憶（skill-like）
 - [x] 個人化 API：`GET/PUT /api/user/profile`、`GET /api/user/memory`
+- [x] AI 設定 API：`GET/PUT /api/user/ai-settings`、`PUT /api/user/location`（含經緯度、當前地區）
 
-### 2e. AI 對話影片推薦（MVP）
+### 2d. AI 對話影片推薦（MVP）
 
 - [x] `POST /api/chat` 回傳推薦影片（最多 5 支，含縮圖、摘要、時間戳）
-- [x] 前端對話區顯示推薦卡片
+- [x] 前端對話區顯示推薦卡片（含推薦理由與片段跳轉連結）
 - [x] 點擊影片可開啟小型播放器
-- [x] 點擊時間戳可跳轉影片片段
-- [x] 推薦結果可對應使用者偏好
-- [x] 推薦排序加入個人化權重（profile + memory re-rank）
+- [x] 點擊時間戳可跳轉影片片段（前端片段標籤連結到 YouTube ?t= 時間點）
+- [x] 推薦結果帶有推薦理由（recommendation_reasons）
+- [x] 推薦排序使用重排引擎（reranker.py：城市/關鍵字/預算/節奏/約束/新鮮度/來源）
+- [x] 推薦事件追蹤（impression / click / segment_jump）
 
-### 2f. 效能與重複處理優化
+### 2e. 效能與重複處理優化
 
 - [x] 已處理影片可直接由 DB 命中（不重跑分段與抽取）
 - [x] 影片索引流程加入去重鍵（youtube_id + 版本）
 - [x] Redis 快取熱門 query 與使用者 context
 - [x] 明確驗證：不儲存整部影片與完整字幕原文
 
-### 2c. 驗收
+### 2f. 驗收
 
 測量定義：以下指標需有明確測量方式（何種請求、從哪個端點、採用平均/中位數/p95）。
 
-- [ ] 所有 API 端點正常
+- [ ] 所有 API 端點正常（需逐一煙霧測試）
 - [ ] RAG 檢索相關度 > 70%（人工抽樣或與 golden set 比較）
-- [ ] Tool-calling 成功率 > 80%
-- [ ] 單次 chat 請求（含 1 次 RAG + 1 次 tool call）p95 回應時間 < 5 秒
+- [ ] Tool-calling 成功率 > 80%（可透過 quality-dashboard 查看）
+- [ ] 單次 chat 請求（含 1 次 RAG + 1 次 tool call）p95 回應時間 < 5 秒（可透過 locustfile.py 壓測）
 
 ---
 
@@ -234,14 +242,14 @@
 - [x] 建立 frontend 專案（Next.js App Router）
 - [x] 設定 Tailwind CSS
 - [x] 設計路由：首頁、Chat 頁、行程頁（app/page.tsx 含 Chat 與行程規劃 UI）
-- [ ] 設定 SSR/ISR（若有需要）
-- [ ] shadcn/ui（選用）
+- [x] 設定 SSR/ISR（若有需要）（`frontend/app/home/page.tsx` 設定 `revalidate = 300`）
+- [x] shadcn/ui（選用）（已導入基礎 `Button` 元件與 utility）
 
 ### 2. 首頁
 
-- [ ] 核心 Slogan 與簡短說明
-- [ ] 「按住說話」主按鈕
-- [ ] Demo 動畫或 GIF（選用）
+- [x] 核心 Slogan 與簡短說明（`frontend/app/page.tsx` 首屏導語）
+- [x] 「按住說話」主按鈕（首屏 CTA 與聊天區語音按鈕）
+- [x] Demo 動畫或 GIF（選用）（首屏語音波形動畫）
 
 ### 3. Chat UI
 
@@ -249,6 +257,7 @@
 - [x] 輸入框（文字輸入）
 - [x] 串流回應顯示（對接 Ollama API，SSE）
 - [x] 快捷按鈕（如天數、親子景點等，依 page.tsx 實作）
+- [x] 工具使用摘要顯示（tool_calls_summary）
 
 ### 4. 語音輸入
 
@@ -257,39 +266,50 @@
 - [x] 語音轉文字顯示於輸入框
 - [x] 可編輯後再送出
 
-### 5. 影片牆與片段卡片
+### 5. 影片推薦與片段卡片
 
-- [ ] 影片牆布局（Reels 風格）
-- [ ] YouTube Player API 整合
-- [ ] 片段卡片：縮圖、標題、時長、Tag
-- [ ] 點卡片跳轉影片時間
-- [ ] 片段列表上下滑動（選用）
+- [x] 推薦影片卡片（含縮圖、標題、城市標籤、來源標籤）
+- [x] 片段時間戳跳轉連結（藍色標籤，連結到 YouTube ?t= 時間點）
+- [x] 「為何推薦」區塊（綠色區塊，列出 recommendation_reasons）
+- [x] 點擊推薦卡片開啟播放器
+- [x] 影片牆布局（Reels 風格）（推薦卡改為橫向 snap 卡片流）
+- [x] YouTube Player API 嵌入式播放（目前為外連）（已使用嵌入式 iframe 播放與片段跳轉）
+- [x] 片段列表上下滑動（選用）（卡片內片段清單可垂直捲動）
 
 ### 6. 地圖與行程視覺化
 
-- [ ] Google Maps 元件
-- [ ] 景點標記
-- [ ] 路線顯示（Directions）
-- [ ] 行程時間軸
+- [x] Google Maps 元件（已整合）
+- [x] 景點標記（搜尋結果標記）
+- [x] 路線顯示（Directions API 整合）（`frontend/app/page.tsx`：依當日景點繪製 Google Directions 路線）
+- [x] 行程時間軸視覺化（`frontend/app/page.tsx`：顯示到達/離開時間與前段交通資訊）
 
-### 7. 即時通訊
+### 7. 行程規劃 UI
 
-- [ ] WebSocket 或 Socket.io 客戶端
-- [ ] 串流 AI 回應即時顯示
-- [ ] 行程更新即時反映
+- [x] 多日行程管理（DayPlan 切換、新增、刪除、拖曳排序）
+- [x] 行程編輯（景點拖曳排序、移至其他天）
+- [x] 待安排清單
+- [x] 儲存行程到伺服器（saveItineraryToServer）
+- [x] 載入已儲存行程（從 API 讀取）（`GET /api/itinerary`、`GET /api/itinerary/:id` + 前端載入流程）
+- [x] 行程匯出（PDF / 圖片 / 分享連結）（`frontend/app/page.tsx`：匯出 PDF、PNG、複製分享連結）
 
-### 8. 響應式設計
+### 8. 即時通訊
 
-- [ ] Mobile First 版面
-- [ ] 平板、桌面斷點
-- [ ] 觸控與手勢（選用）
+- [x] WebSocket 客戶端（含 token 認證）
+- [x] 串流 AI 回應即時顯示
+- [x] 行程更新即時反映（itinerary_update 事件）
 
-### 9. 驗收
+### 9. 響應式設計
 
-- [ ] 語音輸入可用
-- [ ] 影片播放與跳轉正常
-- [ ] 地圖顯示正確
-- [ ] 響應式完成
+- [x] Mobile First 版面（主版面改為 mobile-first 單欄，桌面再分欄）
+- [x] 平板、桌面斷點（`xl` 雙欄、`md` 內容調整）
+- [x] 觸控與手勢（選用）（行程區支援左右滑動切換 Day）
+
+### 10. 驗收
+
+- [x] 語音輸入可用
+- [x] 影片播放與跳轉正常（嵌入式播放器待完成）
+- [x] 地圖顯示正確
+- [x] 響應式完成
 
 ---
 
@@ -299,18 +319,19 @@
 
 依據：[pythonspeed.com - Decoupling migrations](https://pythonspeed.com/articles/schema-migrations-server-startup)：生產環境 migration 應在部署前單獨執行，不應隨應用啟動自動執行。
 
-- [ ] 整理生產環境變數清單（含必填項檢查）
-- [ ] 建立部署用 Dockerfile（可選）
-- [ ] 確認 migration 腳本可重複執行（001、002 等使用 IF NOT EXISTS）
-- [ ] 定義 migration 執行流程：部署前由 CI/CD 或手動執行，不隨應用啟動
-- [ ] README 部署章節
+- [x] 整理生產環境變數清單（含必填項檢查）（`scripts/deploy/validate_env.mjs`）
+- [x] 建立部署用 Dockerfile（可選）（`ai-service/`、`api-gateway/`、`frontend/`）
+- [x] 確認 migration 腳本可重複執行（001-011 使用 IF NOT EXISTS）
+- [x] 定義 migration 執行流程：部署前由 CI/CD 或手動執行，不隨應用啟動（`api-gateway/scripts/run_migrations.js` + `migrate:*` scripts）
+- [x] README 部署章節（`README.md`、`api-gateway/README.md`、`ai-service/README.md`）
 
 ### 2. 上線前檢查清單
 
 - [ ] 所有敏感環境變數已設定且正確
-- [ ] 資料庫 migration（001、002）已在目標環境執行完成
+- [ ] 資料庫 migration（001-011）已在目標環境執行完成
 - [ ] pgvector 擴充已安裝，segments、places 的 HNSW 索引已建立
-- [ ] 至少一次端對端測試：chat -> RAG -> 行程產出 -> 儲存
+- [ ] 至少一次端對端測試：chat -> RAG -> tool call -> 行程產出 -> 儲存
+- [ ] 推薦事件追蹤表已建立（migration 011）
 
 ### 3. 前端部署
 
@@ -321,7 +342,7 @@
 ### 4. 後端部署
 
 - [ ] Railway / Render 部署 ai-service（FastAPI）
-- [ ] （若採用）部署 api-gateway（Node.js + Express）
+- [ ] 部署 api-gateway（Node.js + Express）
 - [ ] 設定 DATABASE_URL、REDIS_URL
 - [ ] 設定 OLLAMA_BASE_URL（若分開部署需調整）
 
@@ -329,29 +350,68 @@
 
 - [ ] Supabase 建立 PostgreSQL 專案
 - [ ] 安裝 pgvector 擴充
-- [ ] 執行 migration 001、002
+- [ ] 執行 migration 001-011
 - [ ] 確認向量索引已建立
 - [ ] Upstash Redis 或自架，設定 REDIS_URL
 
 ### 6. 測試與監控
 
-依據：上線前即需基本可觀測性，不應延後到階段五。
-
-- [ ] 功能測試清單
-- [ ] 效能測試（定義測量情境：如 chat p95 < 5 秒、行程規劃 < 10 秒）
+- [x] 壓測腳本已建立（benchmark/locustfile.py，含 chat/weather/search/recommendation/health 場景）
+- [ ] 執行壓測並確認 p95 達標
 - [ ] 至少 5 位內部使用者測試
-- [ ] 錯誤監控（必選）：錯誤率、主要 API 延遲；可使用 Railway/Render 內建或第三方服務
+- [x] 錯誤監控已整合：Sentry（ai-service）、Prometheus /metrics（api-gateway + ai-service）
+- [x] 審計日誌已建立（developer_audit_logs）
+- [x] 品質儀表板已建立（/api/dev/quality-dashboard）
 
 ---
 
-## 階段五：後續優化（Scale）
+## 階段五：個人化深化與體驗優化（Week 7-8，對齊 8 週計畫）
+
+### 1. 個人化閉環強化
+
+- [x] 推薦事件追蹤資料表（migration 011: recommendation_events）
+- [x] 推薦事件 API（POST /api/recommendation/event）
+- [x] 推薦指標查詢 API（GET /api/recommendation/metrics）
+- [x] 品質基線資料表（migration 011: quality_baselines）
+- [x] 建立離線評估集（至少含：天氣問答、城市推薦、行程偏好 golden set）（`benchmark/offline_golden_set.json`）
+- [x] 首次品質基線量測並記錄（`api-gateway/scripts/run_offline_baseline.js`；報告：`benchmark/reports/offline-baseline-2026-02-28T07-33-12-073Z.json`）
+- [x] 推薦 CTR 追蹤與逐週比較（`GET /api/recommendation/ctr-weekly`、`GET /api/dev/recommendation/ctr-weekly`、weekly baseline 寫入 `quality_baselines`）
+
+### 2. 推薦引擎持續優化
+
+- [x] 統一重排引擎 v1（reranker.py）
+- [x] 推薦解釋性：recommendation_reasons + score_breakdown
+- [x] 整合 YouTube 即時搜尋結果到候選池（build_candidates_from_youtube_api 已建立，已在 get_recommended_videos 串接）
+- [x] 依使用者歷史點擊調整推薦權重（利用 recommendation_events；已在 get_recommended_videos + reranker 加入 behavior_feedback）
+- [x] 定期重算推薦基線指標（`api-gateway/scripts/recompute_recommendation_baselines.js`，輸出寫入 `quality_baselines`）
+
+### 3. 行程規劃深度化
+
+- [x] 約束引擎 v2（planner.py）：預算/節奏/交通/必去/避開/時段檢查
+- [x] Haversine 距離計算 + 交通時間估算
+- [x] 串接 Google Maps Directions API 取得真實交通時間（`planner.py`：`fetch_google_directions_minutes`，失敗自動回退估算）
+- [x] 行程可行性報告前端視覺化（顯示 warnings 與 feasible 標記）（`frontend/app/page.tsx`）
+- [x] 行程重新優化功能（使用者調整後重新計算）（`POST /api/itinerary/reoptimize` + 前端「重新優化/套用優化排序」）
+
+### 4. 體驗流暢度
+
+- [x] 工具呼叫重試機制（_execute_with_retry，最多 2 次）
+- [x] 天氣查詢保底機制（模型未呼叫工具時自動補查）
+- [x] 前端送出聊天時附帶 city 保底
+- [ ] chat 核心路徑 p95 < 5 秒（需實測確認）
+- [ ] 工具失敗時降級回覆文案優化
+- [ ] 串流回應首 token 時間優化
+
+---
+
+## 階段六：後續擴展（Scale）
 
 ### 1. 效能優化
 
 - [ ] 模型量化（q5_k_m 等）
-- [ ] Redis 快取常用查詢
-- [ ] Embedding 批次處理（已於階段一採用 batch_size，此處可調優）
-- [ ] 資料庫查詢優化
+- [x] Redis 快取常用查詢
+- [ ] Embedding 批次處理調優
+- [ ] 資料庫查詢優化（慢查詢分析）
 
 ### 2. 擴展（若有流量）
 
@@ -361,8 +421,12 @@
 
 ### 3. 監控與維運
 
-- [ ] Prometheus + Grafana
-- [ ] 日誌聚合
+- [x] Prometheus /metrics 端點（api-gateway + ai-service）
+- [x] Sentry 錯誤追蹤（ai-service）
+- [x] 審計日誌（developer_audit_logs + developer_login_events）
+- [x] 開發者後台（/dev/dashboard）
+- [ ] Grafana 視覺化儀表板
+- [ ] 日誌聚合（ELK / Loki）
 - [ ] 告警規則
 
 ---
@@ -373,6 +437,32 @@
 
 - Docker Compose 設定（PostgreSQL、Redis、Ollama），Ollama 已啟用 NVIDIA GPU（deploy.resources.reservations.devices）
 - 資料庫 Schema（videos、segments、places、segment_places、itineraries 等）與 init-db.sql
-- Migration 腳本（001_initial_schema.sql、002_itineraries.sql、003_add_segments_tags.sql）
-- 專案目錄結構（frontend、video-indexer、scripts、docs）
+- Migration 腳本（001-011），涵蓋：初始 schema、行程表、tags、使用者帳號、記憶、偏好向量、AI 設定與位置、審計日誌、推薦事件追蹤
+- 專案目錄結構（frontend、api-gateway、ai-service、video-indexer、scripts、docs、benchmark）
 - .env.example、API 金鑰取得指南、虛擬環境指南
+- 個人化模組（personalization.py）、推薦重排引擎（reranker.py）、行程約束引擎（planner.py）
+- 工具呼叫系統（agent.py）：天氣/YouTube/交通/旅遊資訊/時間查詢 + 重試 + 保底機制
+- 單元測試 28 個通過（test_tools、test_personalization、test_reranker、test_planner）
+
+---
+
+## 目前開發狀態總覽（2026-02-28）
+
+| 模組 | 狀態 | 備註 |
+|------|------|------|
+| 影片索引 (video-indexer) | 基礎完成 | 缺少自動化排程、需手動執行 |
+| AI 服務 (ai-service) | 核心完成 | chat/RAG/tool-calling/推薦/規劃/個人化皆已實作 |
+| API 閘道 (api-gateway) | 核心完成 | 認證/chat/itinerary/記憶/AI設定/事件追蹤/dev console |
+| 前端 (frontend) | 核心完成 | chat/行程/地圖/推薦卡片/語音/片段跳轉皆已有 |
+| 資料庫 | 已備妥 | migration 001-011，含 pgvector/HNSW |
+| 監控與品質 | 基礎完成 | Prometheus/Sentry/audit/quality-dashboard/壓測腳本 |
+| 部署 | 尚未開始 | Docker 可本地運行，生產部署待進行 |
+
+### 下一步優先事項
+
+1. 執行 migration 011 並驗證推薦事件追蹤
+2. 建立離線品質評估集並做首次基線量測
+3. 串接 YouTube 即時搜尋結果到推薦候選池
+4. 前端行程可行性報告視覺化
+5. 端對端煙霧測試 + 壓測確認 p95
+6. 進入部署準備

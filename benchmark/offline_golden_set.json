@@ -1,0 +1,87 @@
+[
+  {
+    "id": "weather_taipei_rain",
+    "category": "weather",
+    "message": "台北今天會下雨嗎？出門要不要帶傘？",
+    "city": "台北",
+    "expected_keywords": ["台北", "天氣"],
+    "min_keyword_hits": 1,
+    "expected_tool": "get_weather",
+    "min_recommendations": 0
+  },
+  {
+    "id": "weather_kaohsiung_temp",
+    "category": "weather",
+    "message": "高雄現在氣溫大概幾度？",
+    "city": "高雄",
+    "expected_keywords": ["高雄", "天氣"],
+    "min_keyword_hits": 1,
+    "expected_tool": "get_weather",
+    "min_recommendations": 0
+  },
+  {
+    "id": "weather_hualien_weekend",
+    "category": "weather",
+    "message": "這週末花蓮天氣適合戶外行程嗎？",
+    "city": "花蓮",
+    "expected_keywords": ["花蓮", "天氣"],
+    "min_keyword_hits": 1,
+    "expected_tool": "get_weather",
+    "min_recommendations": 0
+  },
+  {
+    "id": "city_recommend_tainan_food",
+    "category": "city_recommend",
+    "message": "推薦台南美食旅遊影片給我",
+    "city": "台南",
+    "expected_keywords": ["台南", "美食"],
+    "min_keyword_hits": 1,
+    "min_recommendations": 1
+  },
+  {
+    "id": "city_recommend_taichung_family",
+    "category": "city_recommend",
+    "message": "我想找台中親子旅遊推薦",
+    "city": "台中",
+    "expected_keywords": ["台中", "親子"],
+    "min_keyword_hits": 1,
+    "min_recommendations": 1
+  },
+  {
+    "id": "city_recommend_kaohsiung_budget",
+    "category": "city_recommend",
+    "message": "請推薦高雄適合小資族的旅遊內容",
+    "city": "高雄",
+    "expected_keywords": ["高雄", "小資"],
+    "min_keyword_hits": 1,
+    "min_recommendations": 1
+  },
+  {
+    "id": "itinerary_pref_tainan_2d",
+    "category": "itinerary_preference",
+    "message": "我想安排台南兩天一夜，偏好小吃和古蹟，預算不要太高",
+    "city": "台南",
+    "expected_keywords": ["台南", "行程", "預算"],
+    "min_keyword_hits": 1,
+    "min_recommendations": 1
+  },
+  {
+    "id": "itinerary_pref_taipei_relax",
+    "category": "itinerary_preference",
+    "message": "幫我規劃台北一天慢遊行程，節奏輕鬆，盡量搭大眾運輸",
+    "city": "台北",
+    "expected_keywords": ["台北", "行程", "輕鬆"],
+    "min_keyword_hits": 1,
+    "min_recommendations": 1
+  },
+  {
+    "id": "itinerary_pref_hsinchu_rain",
+    "category": "itinerary_preference",
+    "message": "新竹下雨天可以怎麼安排半天室內行程？",
+    "city": "新竹",
+    "expected_keywords": ["新竹", "室內", "行程"],
+    "min_keyword_hits": 1,
+    "expected_tool": "get_weather",
+    "min_recommendations": 1
+  }
+]

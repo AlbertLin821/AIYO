@@ -76,6 +76,7 @@ volumes:
   postgres_data:
   pgadmin_data:
   redis_data:
+  open_webui_data:
 
 networks:
   aiyo-network:

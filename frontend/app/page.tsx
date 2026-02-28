@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, TouchEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Button } from "@/components/ui/button";
 
 type TransportMode = "drive" | "transit" | "walk" | "bike";
 type BudgetMode = "A" | "B" | "C";
@@ -38,6 +39,19 @@ type UserProfile = {
   preferred_cities?: string[] | null;
 };
 
+type UserAiSettings = {
+  tool_policy_json?: {
+    enabled?: boolean;
+    weather_use_current_location?: boolean;
+    tool_trigger_rules?: string;
+  } | null;
+  weather_default_region?: string | null;
+  auto_use_current_location?: boolean;
+  current_lat?: number | null;
+  current_lng?: number | null;
+  current_region?: string | null;
+};
+
 type RecommendedSegment = {
   segment_id: number;
   start_sec: number;
@@ -55,6 +69,72 @@ type RecommendedVideo = {
   thumbnail_url?: string;
   summary?: string;
   segments: RecommendedSegment[];
+  rank_position?: number;
+  rank_score?: number;
+  recommendation_reasons?: string[];
+  score_breakdown?: Record<string, number>;
+  source?: string;
+};
+
+type OptimizedSlot = {
+  place_name: string;
+  travel_minutes_from_prev: number;
+  travel_mode?: string;
+  travel_time_source?: string;
+  stay_minutes?: number;
+  time_start?: string;
+  time_end?: string;
+  notes?: string[];
+};
+
+type OptimizedDay = {
+  day_number: number;
+  total_cost?: number;
+  total_travel_minutes?: number;
+  warnings?: string[];
+  slots: OptimizedSlot[];
+};
+
+type ItineraryOptimizationResult = {
+  feasible: boolean;
+  total_cost?: number;
+  warnings?: string[];
+  must_visit_missing?: string[];
+  days: OptimizedDay[];
+};
+
+type SavedItinerarySummary = {
+  id: number;
+  title?: string | null;
+  session_id?: string;
+  days_count?: number;
+  status?: string;
+  updated_at?: string;
+};
+
+type SavedItinerarySlot = {
+  place_name: string;
+  slot_order?: number;
+  time_range_start?: string | null;
+  time_range_end?: string | null;
+};
+
+type SavedItineraryDay = {
+  day_number: number;
+  date_label?: string | null;
+  slots: SavedItinerarySlot[];
+};
+
+type SavedItineraryDetail = SavedItinerarySummary & {
+  days: SavedItineraryDay[];
+};
+
+type ToolCallSummary = {
+  tool?: string;
+  ok?: boolean;
+  source?: string;
+  error?: string | null;
+  arguments?: Record<string, unknown>;
 };
 
 type SpeechRecognitionEventLike = Event & {
@@ -164,6 +244,13 @@ function estimateTransport(mode: TransportMode, distanceKm: number): { minutes: 
   const speed = mode === "drive" ? 45 : mode === "transit" ? 30 : mode === "bike" ? 14 : 5;
   const minutes = Math.round((distanceKm / speed) * 60 + (mode === "transit" ? 12 : 4));
   return { minutes, distance: `${distanceKm.toFixed(1)} km` };
+}
+
+function toGoogleTravelMode(mode: TransportMode): google.maps.TravelMode {
+  if (mode === "drive") return google.maps.TravelMode.DRIVING;
+  if (mode === "walk") return google.maps.TravelMode.WALKING;
+  if (mode === "bike") return google.maps.TravelMode.BICYCLING;
+  return google.maps.TravelMode.TRANSIT;
 }
 
 function buildNextDay(days: DayPlan[]): DayPlan {
@@ -447,9 +534,11 @@ export default function HomePage() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_CHAT_MESSAGES);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatDegraded, setChatDegraded] = useState(false);
+  const [toolCallSummaries, setToolCallSummaries] = useState<ToolCallSummary[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatSessionId, setChatSessionId] = useState(() => createSessionId());
   const sessionFromUrl = searchParams.get("session");
+  const itineraryFromUrl = searchParams.get("itineraryId");
   useEffect(() => {
     if (sessionFromUrl && sessionFromUrl.trim()) {
       setChatSessionId(sessionFromUrl.trim());
@@ -465,11 +554,19 @@ export default function HomePage() {
   const [profile, setProfile] = useState<UserProfile>({});
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  const [aiSettings, setAiSettings] = useState<UserAiSettings>({});
+  const [aiSettingsSaving, setAiSettingsSaving] = useState(false);
+  const [aiSettingsNotice, setAiSettingsNotice] = useState<string | null>(null);
   const [memoryItems, setMemoryItems] = useState<Array<{ id: number; memory_text: string; memory_type: string }>>([]);
   const [memoryReviewing, setMemoryReviewing] = useState(false);
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
-  const [autoMemorySync, setAutoMemorySync] = useState(false);
   const [recommendedVideos, setRecommendedVideos] = useState<RecommendedVideo[]>([]);
+  const [optimizingItinerary, setOptimizingItinerary] = useState(false);
+  const [optimizationResult, setOptimizationResult] = useState<ItineraryOptimizationResult | null>(null);
+  const [savedItineraries, setSavedItineraries] = useState<SavedItinerarySummary[]>([]);
+  const [selectedItineraryId, setSelectedItineraryId] = useState<number | null>(null);
+  const [loadingSavedItinerary, setLoadingSavedItinerary] = useState(false);
+  const [activeItineraryId, setActiveItineraryId] = useState<number | null>(null);
   const [playerVideo, setPlayerVideo] = useState<RecommendedVideo | null>(null);
   const [playerStartSec, setPlayerStartSec] = useState(0);
   const [mapReady, setMapReady] = useState(false);
@@ -485,11 +582,37 @@ export default function HomePage() {
   const mapClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const markerRefs = useRef<Map<string, google.maps.Marker>>(new Map());
   const searchResultMarkersRef = useRef<google.maps.Marker[]>([]);
+  const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
+  const directionsServiceRef = useRef<google.maps.DirectionsService | null>(null);
   const placesServiceRef = useRef<google.maps.places.PlacesService | null>(null);
   const searchBoxRef = useRef<google.maps.places.SearchBox | null>(null);
   const searchBoxPlacesChangedListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const searchBoxBoundsChangedListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const streetViewServiceRef = useRef<google.maps.StreetViewService | null>(null);
+  const locationSyncOnceRef = useRef(false);
+  const itineraryTouchStartXRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+    void fetchSavedItineraryList();
+    // fetchSavedItineraryList uses latest state via render closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
+
+  useEffect(() => {
+    if (!authReady || !itineraryFromUrl) {
+      return;
+    }
+    const parsed = Number(itineraryFromUrl);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return;
+    }
+    void loadSavedItinerary(parsed);
+    // loadSavedItinerary depends on runtime state and is intentionally re-bound per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady, itineraryFromUrl]);
 
   const state = history[historyIndex];
   const selectedDay = state.days.find((day) => day.id === state.selectedDayId) ?? state.days[0];
@@ -518,6 +641,33 @@ export default function HomePage() {
 
   const estimatedDayCost = selectedDayPlaces.reduce((sum, place) => sum + place.estimatedCost, 0);
   const enableDayHorizontalScroll = state.days.length > 5;
+  const selectedDayTimeline = useMemo(() => {
+    let cursorMinutes = 9 * 60;
+    return selectedDayPlaces.map((place, index) => {
+      let travelMinutes = 0;
+      let mode: TransportMode = "drive";
+      if (index > 0) {
+        const prev = selectedDayPlaces[index - 1];
+        const pairKey = `${selectedDay.id}:${index - 1}-${index}`;
+        mode = state.transportModes[pairKey] ?? "drive";
+        travelMinutes = estimateTransport(mode, mapDistanceKm(prev, place)).minutes;
+        cursorMinutes += travelMinutes;
+      }
+      const arrivalMinutes = cursorMinutes;
+      const departMinutes = arrivalMinutes + place.stayMinutes;
+      cursorMinutes = departMinutes;
+      const fmt = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+      return {
+        placeId: place.id,
+        placeName: place.name,
+        arrivalText: fmt(arrivalMinutes),
+        departText: fmt(departMinutes),
+        stayMinutes: place.stayMinutes,
+        travelMinutesFromPrev: travelMinutes,
+        travelModeFromPrev: mode
+      };
+    });
+  }, [selectedDay.id, selectedDayPlaces, state.transportModes]);
 
   function openStreetViewAt(lat: number, lng: number) {
     const map = googleMapRef.current;
@@ -1092,6 +1242,9 @@ export default function HomePage() {
       alive = false;
       mapClickListenerRef.current?.remove();
       mapClickListenerRef.current = null;
+      directionsRendererRef.current?.setMap(null);
+      directionsRendererRef.current = null;
+      directionsServiceRef.current = null;
       markers.forEach((marker) => marker.setMap(null));
       markers.clear();
       clearSearchResultMarkers();
@@ -1136,6 +1289,53 @@ export default function HomePage() {
       map.fitBounds(bounds, 80);
     }
   }, [mapPlaces]);
+
+  useEffect(() => {
+    const map = googleMapRef.current;
+    const googleApi = window.google;
+    if (!map || !googleApi?.maps) {
+      return;
+    }
+    if (!directionsRendererRef.current) {
+      directionsRendererRef.current = new googleApi.maps.DirectionsRenderer({
+        suppressMarkers: false,
+        preserveViewport: true,
+        polylineOptions: { strokeColor: "#2563eb", strokeWeight: 5, strokeOpacity: 0.75 }
+      });
+      directionsRendererRef.current.setMap(map);
+    }
+    if (!directionsServiceRef.current) {
+      directionsServiceRef.current = new googleApi.maps.DirectionsService();
+    }
+    if (selectedDayPlaces.length < 2) {
+      directionsRendererRef.current.setMap(null);
+      return;
+    }
+    directionsRendererRef.current.setMap(map);
+
+    const firstLegMode = (state.transportModes[`${selectedDay.id}:0-1`] ?? "drive") as TransportMode;
+    const origin = selectedDayPlaces[0];
+    const destination = selectedDayPlaces[selectedDayPlaces.length - 1];
+    const waypoints = selectedDayPlaces.slice(1, -1).map((place) => ({
+      location: new googleApi.maps.LatLng(place.lat, place.lng),
+      stopover: true
+    }));
+    const request: google.maps.DirectionsRequest = {
+      origin: new googleApi.maps.LatLng(origin.lat, origin.lng),
+      destination: new googleApi.maps.LatLng(destination.lat, destination.lng),
+      waypoints,
+      optimizeWaypoints: false,
+      travelMode: toGoogleTravelMode(firstLegMode)
+    };
+
+    directionsServiceRef.current.route(request, (result, status) => {
+      if (status === googleApi.maps.DirectionsStatus.OK && result) {
+        directionsRendererRef.current?.setDirections(result);
+      } else {
+        directionsRendererRef.current?.setMap(null);
+      }
+    });
+  }, [selectedDay.id, selectedDayPlaces, state.transportModes, mapReady]);
 
   useEffect(() => {
     const map = googleMapRef.current;
@@ -1436,9 +1636,10 @@ export default function HomePage() {
     setProfileLoading(true);
     void (async () => {
       try {
-        const [profileResponse, memoryResponse] = await Promise.all([
+        const [profileResponse, memoryResponse, aiSettingsResponse] = await Promise.all([
           apiFetchWithAuth(`${API_BASE_URL}/api/user/profile`),
-          apiFetchWithAuth(`${API_BASE_URL}/api/user/memory?limit=8`)
+          apiFetchWithAuth(`${API_BASE_URL}/api/user/memory?limit=8`),
+          apiFetchWithAuth(`${API_BASE_URL}/api/user/ai-settings`)
         ]);
         if (profileResponse.ok) {
           const profileData = (await profileResponse.json()) as { profile?: UserProfile };
@@ -1454,6 +1655,12 @@ export default function HomePage() {
             setMemoryItems(memoryData.items || []);
           }
         }
+        if (aiSettingsResponse.ok) {
+          const aiData = (await aiSettingsResponse.json()) as { settings?: UserAiSettings };
+          if (alive) {
+            setAiSettings(aiData.settings || {});
+          }
+        }
       } finally {
         if (alive) {
           setProfileLoading(false);
@@ -1463,6 +1670,47 @@ export default function HomePage() {
     return () => {
       alive = false;
     };
+  }, [authReady]);
+
+  async function syncCurrentLocation() {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      return;
+    }
+    return new Promise<void>((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          try {
+            const response = await apiFetchWithAuth(`${API_BASE_URL}/api/user/location`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                lat: position.coords.latitude,
+                lng: position.coords.longitude
+              })
+            });
+            if (response.ok) {
+              const data = (await response.json()) as { settings?: UserAiSettings };
+              setAiSettings((prev) => ({ ...prev, ...(data.settings || {}) }));
+              setAiSettingsNotice("已更新目前位置，天氣問題可自動帶入你目前地區。");
+            }
+          } catch {
+            // Ignore location sync errors to avoid interrupting chat.
+          } finally {
+            resolve();
+          }
+        },
+        () => resolve(),
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    });
+  }
+
+  useEffect(() => {
+    if (!authReady || locationSyncOnceRef.current) {
+      return;
+    }
+    locationSyncOnceRef.current = true;
+    void syncCurrentLocation();
   }, [authReady]);
 
   useEffect(() => {
@@ -1646,6 +1894,32 @@ export default function HomePage() {
     setOpenMoveMenuKey((current) => (current === key ? null : key));
   }
 
+  function onItineraryTouchStart(event: TouchEvent<HTMLDivElement>) {
+    itineraryTouchStartXRef.current = event.changedTouches[0]?.clientX ?? null;
+  }
+
+  function onItineraryTouchEnd(event: TouchEvent<HTMLDivElement>) {
+    const startX = itineraryTouchStartXRef.current;
+    itineraryTouchStartXRef.current = null;
+    if (startX === null) {
+      return;
+    }
+    const endX = event.changedTouches[0]?.clientX ?? startX;
+    const delta = endX - startX;
+    if (Math.abs(delta) < 60) {
+      return;
+    }
+    const currentIndex = state.days.findIndex((day) => day.id === state.selectedDayId);
+    if (currentIndex < 0) {
+      return;
+    }
+    const targetIndex = delta < 0 ? currentIndex + 1 : currentIndex - 1;
+    if (targetIndex < 0 || targetIndex >= state.days.length) {
+      return;
+    }
+    selectDay(state.days[targetIndex].id);
+  }
+
   function onSubmitChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = chatInput.trim();
@@ -1663,11 +1937,14 @@ export default function HomePage() {
     setChatLoading(true);
     setChatInput("");
     setRecommendedVideos([]);
+    setToolCallSummaries([]);
     setChatMessages(trimChatMessages([...nextMessages, { role: "assistant", content: "" }], CHAT_MEMORY_LIMIT + 1));
     streamingViaSseRef.current = true;
 
     void (async () => {
       try {
+        const resolvedChatCity =
+          aiSettings.current_region?.trim() || aiSettings.weather_default_region?.trim() || undefined;
         const response = await apiFetchWithAuth(`${API_BASE_URL}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1675,7 +1952,8 @@ export default function HomePage() {
             sessionId: chatSessionId,
             message: value,
             messages: nextMessages,
-            model: selectedModel || undefined
+            model: selectedModel || undefined,
+            city: resolvedChatCity
           })
         });
 
@@ -1724,6 +2002,7 @@ export default function HomePage() {
                 error?: string;
                 recommended_videos?: RecommendedVideo[];
                 fallback?: boolean;
+                tool_calls_summary?: ToolCallSummary[];
               };
               if (payload.error) {
                 throw new Error(payload.error);
@@ -1744,6 +2023,9 @@ export default function HomePage() {
               if (payload.fallback) {
                 setChatDegraded(true);
               }
+              if (payload.done && payload.tool_calls_summary) {
+                setToolCallSummaries(payload.tool_calls_summary.slice(0, 8));
+              }
             } catch (error) {
               if (error instanceof Error) {
                 throw error;
@@ -1760,6 +2042,8 @@ export default function HomePage() {
               token?: string;
               recommended_videos?: RecommendedVideo[];
               fallback?: boolean;
+              done?: boolean;
+              tool_calls_summary?: ToolCallSummary[];
             };
             if (payload.token) {
               setChatMessages((prev) =>
@@ -1776,6 +2060,9 @@ export default function HomePage() {
             }
             if (payload.fallback) {
               setChatDegraded(true);
+            }
+            if (payload.done && payload.tool_calls_summary) {
+              setToolCallSummaries(payload.tool_calls_summary.slice(0, 8));
             }
           }
         }
@@ -1795,11 +2082,394 @@ export default function HomePage() {
       } finally {
         streamingViaSseRef.current = false;
         setChatLoading(false);
-        if (autoMemorySync) {
-          void runAiMemoryReview();
-        }
+        void runAiMemoryReview();
       }
     })();
+  }
+
+  async function trackRecommendationEvent(
+    eventType: string,
+    video: RecommendedVideo,
+    segmentId?: number | null,
+  ) {
+    if (!authReady) {
+      return;
+    }
+    try {
+      await apiFetchWithAuth(`${API_BASE_URL}/api/recommendation/event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event_type: eventType,
+          session_id: chatSessionId,
+          video_id: video.video_id ?? null,
+          youtube_id: video.youtube_id,
+          segment_id: segmentId ?? null,
+          rank_position: video.rank_position ?? null,
+          rank_score: video.rank_score ?? null,
+          recommendation_reason: video.recommendation_reasons?.join("; ") ?? null,
+          tool_source: video.source ?? null,
+        }),
+      });
+    } catch {
+      // Fire-and-forget; do not interrupt user flow.
+    }
+  }
+
+  function buildItineraryDaysPayload() {
+    return state.days.map((day, dayIndex) => ({
+      day_number: dayIndex + 1,
+      date_label: day.label,
+      slots: day.placeIds
+        .map((placeId, slotIndex) => {
+          const place = getPlaceById(placeId);
+          if (!place) {
+            return null;
+          }
+          return {
+            place_name: place.name,
+            slot_order: slotIndex + 1,
+            segment_id: null,
+            place_id: null
+          };
+        })
+        .filter((slot): slot is NonNullable<typeof slot> => Boolean(slot))
+    }));
+  }
+
+  async function fetchSavedItineraryList() {
+    if (!authReady) {
+      return;
+    }
+    try {
+      const response = await apiFetchWithAuth(`${API_BASE_URL}/api/itinerary?limit=30`);
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json().catch(() => ({}))) as { items?: SavedItinerarySummary[] };
+      const items = Array.isArray(data.items) ? data.items : [];
+      setSavedItineraries(items);
+      if (!selectedItineraryId && items.length > 0) {
+        setSelectedItineraryId(items[0].id);
+      }
+    } catch {
+      // Ignore list fetch errors to avoid blocking UI.
+    }
+  }
+
+  function upsertLoadedPlace(name: string, uniqueSeed: string): string {
+    const normalized = name.trim().toLowerCase();
+    const existed = places.find((item) => item.name.trim().toLowerCase() === normalized);
+    if (existed) {
+      return existed.id;
+    }
+    const placeId = `saved-${uniqueSeed}`;
+    places.push({
+      id: placeId,
+      name: name.trim() || "未命名地點",
+      intro: "由已儲存行程載入",
+      address: "尚未提供地址",
+      phone: "",
+      website: "",
+      rating: 0,
+      hours: "",
+      reasons: [],
+      notes: [],
+      stayMinutes: 60,
+      estimatedCost: 0,
+      recommended: false,
+      x: 0,
+      y: 0,
+      lat: 23.5,
+      lng: 121.0,
+      googleComments: []
+    });
+    return placeId;
+  }
+
+  async function loadSavedItinerary(itineraryId: number) {
+    if (!authReady || !itineraryId || loadingSavedItinerary) {
+      return;
+    }
+    setLoadingSavedItinerary(true);
+    setChatError(null);
+    try {
+      const response = await apiFetchWithAuth(`${API_BASE_URL}/api/itinerary/${itineraryId}`);
+      const data = (await response.json().catch(() => ({}))) as SavedItineraryDetail & { error?: string };
+      if (!response.ok) {
+        throw new Error(data.error || "載入已儲存行程失敗");
+      }
+      const loadedDays = Array.isArray(data.days) ? data.days : [];
+      const normalizedDays = loadedDays
+        .sort((a, b) => Number(a.day_number || 0) - Number(b.day_number || 0))
+        .map((day, dayIndex) => {
+          const placeIds = (Array.isArray(day.slots) ? day.slots : [])
+            .sort((a, b) => Number(a.slot_order || 0) - Number(b.slot_order || 0))
+            .map((slot, slotIndex) =>
+              upsertLoadedPlace(String(slot.place_name || "未命名地點"), `${itineraryId}-${dayIndex + 1}-${slotIndex + 1}`)
+            );
+          return {
+            id: `day${dayIndex + 1}`,
+            label: String(day.date_label || `DAY ${dayIndex + 1}`),
+            placeIds
+          };
+        });
+      if (normalizedDays.length === 0) {
+        throw new Error("此行程尚未儲存任何景點。");
+      }
+      commit((draft) => {
+        draft.days = normalizedDays;
+        draft.selectedDayId = normalizedDays[0].id;
+        draft.pendingPlaceIds = [];
+        draft.transportModes = {};
+      });
+      if (typeof data.session_id === "string" && data.session_id.trim()) {
+        setChatSessionId(data.session_id.trim());
+      }
+      setActiveItineraryId(itineraryId);
+      setSelectedItineraryId(itineraryId);
+      setAiSettingsNotice("已載入已儲存行程。");
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "載入已儲存行程失敗");
+    } finally {
+      setLoadingSavedItinerary(false);
+    }
+  }
+
+  async function saveItineraryToServer() {
+    if (!authReady) {
+      return;
+    }
+    try {
+      const payload = {
+        sessionId: chatSessionId,
+        title: `${state.days[0]?.label ?? "行程"} (${state.days.length} 天)`,
+        daysCount: state.days.length,
+        status: "draft",
+        days: buildItineraryDaysPayload()
+      };
+      const endpoint = activeItineraryId ? `${API_BASE_URL}/api/itinerary/${activeItineraryId}` : `${API_BASE_URL}/api/itinerary`;
+      const method = activeItineraryId ? "PUT" : "POST";
+      const response = await apiFetchWithAuth(endpoint, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = (await response.json().catch(() => ({}))) as SavedItinerarySummary & { error?: string };
+      if (response.ok) {
+        if (typeof data.id === "number") {
+          setActiveItineraryId(data.id);
+          setSelectedItineraryId(data.id);
+        }
+        setChatError(null);
+        setAiSettingsNotice("行程已儲存至伺服器。");
+        await fetchSavedItineraryList();
+      } else {
+        setChatError(data.error || "行程儲存失敗");
+      }
+    } catch {
+      setChatError("行程儲存失敗，請檢查網路連線。");
+    }
+  }
+
+  function buildPlannerSegmentsFromState(): Array<Record<string, unknown>> {
+    const segments: Array<Record<string, unknown>> = [];
+    state.days.forEach((day) => {
+      day.placeIds.forEach((placeId) => {
+        const place = getPlaceById(placeId);
+        if (!place) {
+          return;
+        }
+        segments.push({
+          place_name: place.name,
+          lat: place.lat,
+          lng: place.lng,
+          stay_minutes: place.stayMinutes,
+          estimated_cost: place.estimatedCost,
+          category: place.reasons[0] || ""
+        });
+      });
+    });
+    return segments;
+  }
+
+  async function reoptimizeItinerary() {
+    if (!authReady || optimizingItinerary) {
+      return;
+    }
+    const segments = buildPlannerSegmentsFromState();
+    if (segments.length === 0) {
+      setChatError("目前沒有可重新優化的景點。");
+      return;
+    }
+    setOptimizingItinerary(true);
+    setChatError(null);
+    try {
+      const budgetTotal = state.totalBudget > 0 ? state.totalBudget : null;
+      const budgetPerDay = budgetTotal ? Math.round((budgetTotal / Math.max(1, state.days.length)) * 100) / 100 : null;
+      const response = await apiFetchWithAuth(`${API_BASE_URL}/api/itinerary/reoptimize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          days: state.days.length,
+          segments,
+          preferences: [profile.travel_style, profile.budget_pref, profile.pace_pref, profile.transport_pref].filter(Boolean),
+          budgetTotal,
+          budgetPerDay,
+          mustVisit: [],
+          avoid: []
+        })
+      });
+      const data = (await response.json().catch(() => ({}))) as ItineraryOptimizationResult & { error?: string };
+      if (!response.ok) {
+        throw new Error(data.error || "重新優化失敗");
+      }
+      setOptimizationResult(data);
+      setAiSettingsNotice("已完成重新優化，請查看可行性報告。");
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "重新優化失敗");
+    } finally {
+      setOptimizingItinerary(false);
+    }
+  }
+
+  function applyOptimizationResult() {
+    if (!optimizationResult || !optimizationResult.days?.length) {
+      return;
+    }
+    const availableByName = new Map<string, string[]>();
+    const allPlaceIds = state.days.flatMap((day) => day.placeIds);
+    allPlaceIds.forEach((placeId) => {
+      const place = getPlaceById(placeId);
+      if (!place) {
+        return;
+      }
+      const key = place.name.trim().toLowerCase();
+      const list = availableByName.get(key) ?? [];
+      list.push(placeId);
+      availableByName.set(key, list);
+    });
+
+    commit((draft) => {
+      const nextDays = draft.days.map((day) => ({ ...day, placeIds: [] as string[] }));
+      optimizationResult.days.forEach((optimizedDay, index) => {
+        const targetDay = nextDays[index];
+        if (!targetDay) {
+          return;
+        }
+        optimizedDay.slots.forEach((slot) => {
+          const key = (slot.place_name || "").trim().toLowerCase();
+          if (!key) {
+            return;
+          }
+          const queue = availableByName.get(key) ?? [];
+          const picked = queue.shift();
+          availableByName.set(key, queue);
+          if (picked) {
+            targetDay.placeIds.push(picked);
+          }
+        });
+      });
+      const used = new Set(nextDays.flatMap((day) => day.placeIds));
+      const leftover = allPlaceIds.filter((id) => !used.has(id));
+      draft.days = nextDays;
+      draft.pendingPlaceIds = Array.from(new Set([...draft.pendingPlaceIds, ...leftover]));
+    });
+    setAiSettingsNotice("已套用優化排序。");
+  }
+
+  function exportItineraryAsPdf() {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const textLines: string[] = [];
+    textLines.push(`行程摘要（共 ${state.days.length} 天）`);
+    textLines.push("");
+    state.days.forEach((day, dayIdx) => {
+      textLines.push(`Day ${dayIdx + 1} - ${day.label}`);
+      day.placeIds.forEach((placeId, idx) => {
+        const place = getPlaceById(placeId);
+        if (!place) {
+          return;
+        }
+        textLines.push(`  ${idx + 1}. ${place.name}`);
+      });
+      textLines.push("");
+    });
+    const popup = window.open("", "_blank", "width=900,height=700");
+    if (!popup) {
+      setChatError("無法開啟列印視窗，請檢查瀏覽器彈窗設定。");
+      return;
+    }
+    popup.document.write(`<html><head><title>AIYO 行程匯出</title></head><body><pre>${escapeHtml(textLines.join("\n"))}</pre></body></html>`);
+    popup.document.close();
+    popup.focus();
+    popup.print();
+  }
+
+  function exportItineraryAsImage() {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    const width = 1200;
+    const rowHeight = 36;
+    const titleHeight = 80;
+    const totalRows = state.days.reduce((sum, day) => sum + 1 + day.placeIds.length, 0);
+    const height = Math.max(300, titleHeight + totalRows * rowHeight + 40);
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setChatError("圖片匯出失敗：無法建立畫布。");
+      return;
+    }
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "bold 34px sans-serif";
+    ctx.fillText("AIYO 行程匯出", 40, 55);
+    ctx.font = "20px sans-serif";
+    let y = 95;
+    state.days.forEach((day, dayIdx) => {
+      ctx.fillStyle = "#111827";
+      ctx.font = "bold 22px sans-serif";
+      ctx.fillText(`Day ${dayIdx + 1} - ${day.label}`, 40, y);
+      y += rowHeight;
+      day.placeIds.forEach((placeId, idx) => {
+        const place = getPlaceById(placeId);
+        if (!place) {
+          return;
+        }
+        ctx.fillStyle = "#334155";
+        ctx.font = "18px sans-serif";
+        ctx.fillText(`${idx + 1}. ${place.name}`, 70, y);
+        y += rowHeight;
+      });
+      y += 6;
+    });
+    const link = document.createElement("a");
+    link.href = canvas.toDataURL("image/png");
+    link.download = `aiyo-itinerary-${Date.now()}.png`;
+    link.click();
+  }
+
+  async function copyShareLink() {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const id = activeItineraryId ?? selectedItineraryId;
+    if (!id) {
+      setChatError("請先儲存行程後再建立分享連結。");
+      return;
+    }
+    const url = `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(chatSessionId)}&itineraryId=${encodeURIComponent(String(id))}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setAiSettingsNotice("已複製分享連結。");
+    } catch {
+      setChatError("無法複製分享連結，請手動複製網址列。");
+    }
   }
 
   function clearChatHistory() {
@@ -1888,6 +2558,42 @@ export default function HomePage() {
       setChatError(error instanceof Error ? error.message : "偏好儲存失敗");
     } finally {
       setProfileSaving(false);
+    }
+  }
+
+  async function onSaveAiSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (aiSettingsSaving) {
+      return;
+    }
+    setAiSettingsSaving(true);
+    setAiSettingsNotice(null);
+    setChatError(null);
+    try {
+      const response = await apiFetchWithAuth(`${API_BASE_URL}/api/user/ai-settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          toolPolicy: {
+            enabled: aiSettings.tool_policy_json?.enabled ?? true,
+            weather_use_current_location: aiSettings.tool_policy_json?.weather_use_current_location ?? true,
+            tool_trigger_rules: aiSettings.tool_policy_json?.tool_trigger_rules ?? ""
+          },
+          weatherDefaultRegion: aiSettings.weather_default_region ?? null,
+          autoUseCurrentLocation: aiSettings.auto_use_current_location ?? true
+        })
+      });
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || "AI 工具設定儲存失敗");
+      }
+      const data = (await response.json()) as { settings?: UserAiSettings };
+      setAiSettings(data.settings || {});
+      setAiSettingsNotice("AI 工具策略已更新。");
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "AI 工具設定儲存失敗");
+    } finally {
+      setAiSettingsSaving(false);
     }
   }
 
@@ -1995,6 +2701,72 @@ export default function HomePage() {
               </button>
             </form>
             <div className="mt-2 rounded bg-slate-50 p-2">
+              <p className="mb-2 text-xs font-medium text-slate-700">AI 工具策略設定</p>
+              <form className="mb-2 space-y-2" onSubmit={onSaveAiSettings}>
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={aiSettings.tool_policy_json?.enabled ?? true}
+                    onChange={(event) =>
+                      setAiSettings((prev) => ({
+                        ...prev,
+                        tool_policy_json: {
+                          ...(prev.tool_policy_json || {}),
+                          enabled: event.target.checked
+                        }
+                      }))
+                    }
+                    disabled={aiSettingsSaving}
+                  />
+                  啟用模型工具呼叫
+                </label>
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={aiSettings.auto_use_current_location ?? true}
+                    onChange={(event) => setAiSettings((prev) => ({ ...prev, auto_use_current_location: event.target.checked }))}
+                    disabled={aiSettingsSaving}
+                  />
+                  天氣查詢未指定地點時，自動使用目前位置
+                </label>
+                <input
+                  className="w-full rounded border px-2 py-1 text-xs"
+                  value={aiSettings.weather_default_region ?? ""}
+                  onChange={(event) => setAiSettings((prev) => ({ ...prev, weather_default_region: event.target.value }))}
+                  placeholder="預設地區（例如：台北）"
+                  disabled={aiSettingsSaving}
+                />
+                <textarea
+                  className="w-full rounded border px-2 py-1 text-xs"
+                  rows={3}
+                  value={aiSettings.tool_policy_json?.tool_trigger_rules ?? ""}
+                  onChange={(event) =>
+                    setAiSettings((prev) => ({
+                      ...prev,
+                      tool_policy_json: {
+                        ...(prev.tool_policy_json || {}),
+                        tool_trigger_rules: event.target.value
+                      }
+                    }))
+                  }
+                  placeholder="自訂工具觸發規則"
+                  disabled={aiSettingsSaving}
+                />
+                <div className="flex items-center gap-2">
+                  <button className="rounded border px-2 py-1 text-xs disabled:opacity-60" type="submit" disabled={aiSettingsSaving}>
+                    {aiSettingsSaving ? "儲存中" : "儲存 AI 工具設定"}
+                  </button>
+                  <button
+                    className="rounded border px-2 py-1 text-xs disabled:opacity-60"
+                    type="button"
+                    onClick={() => void syncCurrentLocation()}
+                    disabled={aiSettingsSaving}
+                  >
+                    重新抓取目前位置
+                  </button>
+                </div>
+              </form>
+              {aiSettingsNotice && <p className="mb-1 text-xs text-emerald-700">{aiSettingsNotice}</p>}
               <div className="mb-1 flex items-center justify-between gap-2">
                 <p className="text-xs text-slate-500">近期記憶</p>
                 <button
@@ -2006,15 +2778,7 @@ export default function HomePage() {
                   {memoryReviewing ? "巡檢中" : "AI 檢查偏好"}
                 </button>
               </div>
-              <label className="mb-1 flex items-center gap-2 text-xs text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={autoMemorySync}
-                  onChange={(event) => setAutoMemorySync(event.target.checked)}
-                  disabled={memoryReviewing}
-                />
-                每次送出訊息後自動巡檢長期偏好
-              </label>
+              <p className="mb-1 text-xs text-slate-600">每次送出訊息後會自動巡檢長期偏好（固定啟用）。</p>
               {memoryNotice && <p className="mb-1 text-xs text-emerald-700">{memoryNotice}</p>}
               {memoryItems.length === 0 ? (
                 <p className="text-xs text-slate-500">尚無記憶資料。</p>
@@ -2071,6 +2835,22 @@ export default function HomePage() {
               目前為短期記憶降級模式，長期偏好可能暫時未完整套用。
             </p>
           )}
+          {toolCallSummaries.length > 0 && (
+            <div className="mb-2 rounded border border-slate-200 bg-slate-50 p-2 text-xs">
+              <p className="mb-1 font-medium text-slate-700">本次工具使用</p>
+              <ul className="space-y-1">
+                {toolCallSummaries.map((item, index) => (
+                  <li key={`${item.tool ?? "tool"}-${index}`} className="rounded bg-white px-2 py-1">
+                    <span className="font-medium">{item.tool ?? "unknown"}</span>
+                    {" / "}
+                    <span className={item.ok ? "text-emerald-700" : "text-red-600"}>{item.ok ? "成功" : "失敗"}</span>
+                    {item.source ? ` / ${item.source}` : ""}
+                    {item.error ? ` / ${item.error}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {chatError && <p className="mb-2 text-xs text-red-600">{chatError}</p>}
           <form className="flex gap-2" onSubmit={onSubmitChat}>
             <input
@@ -2121,23 +2901,68 @@ export default function HomePage() {
             {recommendedVideos.length === 0 ? (
               <p className="text-xs text-slate-500">送出對話後會顯示推薦影片。</p>
             ) : (
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              <div className="flex snap-x snap-mandatory gap-2 overflow-x-auto pb-1">
                 {recommendedVideos.map((video) => (
-                  <button
-                    key={video.video_id}
-                    className="rounded border p-2 text-left"
-                    onClick={() => {
-                      setPlayerVideo(video);
-                      setPlayerStartSec(video.segments?.[0]?.start_sec ?? 0);
-                    }}
-                    type="button"
+                  <div
+                    key={video.video_id ?? video.youtube_id}
+                    className="w-[280px] shrink-0 snap-start rounded border bg-white p-2 md:w-[320px]"
                   >
-                    <div className="mb-2 overflow-hidden rounded border bg-slate-100">
-                      <img src={video.thumbnail_url} alt={video.title} className="h-24 w-full object-cover" />
-                    </div>
-                    <p className="text-sm font-medium">{video.title}</p>
-                    <p className="line-clamp-2 text-xs text-slate-600">{video.summary || "無摘要"}</p>
-                  </button>
+                    <button
+                      className="w-full text-left"
+                      onClick={() => {
+                        setPlayerVideo(video);
+                        setPlayerStartSec(video.segments?.[0]?.start_sec ?? 0);
+                        void trackRecommendationEvent("click", video);
+                      }}
+                      type="button"
+                    >
+                      <div className="mb-2 overflow-hidden rounded border bg-slate-100">
+                        <img src={video.thumbnail_url} alt={video.title} className="h-24 w-full object-cover" />
+                      </div>
+                      <p className="text-sm font-medium">{video.title}</p>
+                      {video.city && <span className="mr-1 inline-block rounded bg-blue-50 px-1 text-xs text-blue-700">{video.city}</span>}
+                      {video.source && <span className="inline-block rounded bg-slate-100 px-1 text-xs text-slate-500">{video.source}</span>}
+                      <p className="line-clamp-2 text-xs text-slate-600">{video.summary || "無摘要"}</p>
+                    </button>
+                    {video.recommendation_reasons && video.recommendation_reasons.length > 0 && (
+                      <div className="mt-1 rounded bg-emerald-50 px-2 py-1">
+                        <p className="text-xs font-medium text-emerald-800">為何推薦</p>
+                        <ul className="list-disc pl-4 text-xs text-emerald-700">
+                          {video.recommendation_reasons.map((reason, rIdx) => (
+                            <li key={rIdx}>{reason}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {video.segments && video.segments.length > 0 && (
+                      <div className="mt-1 max-h-24 overflow-y-auto">
+                        <div className="flex flex-wrap gap-1">
+                        {video.segments.map((seg) => {
+                          const startMin = Math.floor((seg.start_sec ?? 0) / 60);
+                          const startSec = (seg.start_sec ?? 0) % 60;
+                          const label = `${startMin}:${String(startSec).padStart(2, "0")}`;
+                          const ytUrl = `https://www.youtube.com/watch?v=${video.youtube_id}&t=${seg.start_sec ?? 0}`;
+                          return (
+                            <a
+                              key={seg.segment_id ?? seg.start_sec}
+                              href={ytUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700 hover:bg-blue-100"
+                              title={seg.summary || `片段 ${label}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void trackRecommendationEvent("segment_jump", video, seg.segment_id);
+                              }}
+                            >
+                              {label}
+                            </a>
+                          );
+                        })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
@@ -2153,8 +2978,28 @@ export default function HomePage() {
         <p className="text-sm text-slate-600">驗證登入狀態中...</p>
       </main>
     ) : (
-    <main className="h-screen p-3">
-      <div className="grid h-full grid-cols-2 gap-3">
+    <main className="min-h-screen p-2 md:p-3">
+      <div className="mb-3 rounded-xl border border-slate-200 bg-white p-3">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-lg font-semibold">AIYO 愛遊：一句話找到靈感，快速生成可行行程</h1>
+            <p className="text-sm text-slate-600">語音對話、影片片段推薦、地圖路線與行程編排整合在同一個畫面。</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" onClick={() => setLeftTab("ai")}>
+              按住說話
+            </Button>
+            <div className="flex items-end gap-1 rounded border px-2 py-1">
+              <span className="h-2 w-1 animate-pulse rounded bg-slate-500" />
+              <span className="h-3 w-1 animate-pulse rounded bg-slate-600 [animation-delay:120ms]" />
+              <span className="h-4 w-1 animate-pulse rounded bg-slate-700 [animation-delay:240ms]" />
+              <span className="h-3 w-1 animate-pulse rounded bg-slate-600 [animation-delay:360ms]" />
+              <span className="h-2 w-1 animate-pulse rounded bg-slate-500 [animation-delay:480ms]" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="grid min-h-[calc(100vh-7rem)] grid-cols-1 gap-3 xl:grid-cols-2">
         <section className="flex min-h-0 flex-col rounded-xl border border-slate-200 bg-white">
           <header className="flex flex-wrap items-center gap-2 border-b border-slate-200 p-3">
             <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-700">{authEmail || "已登入"}</span>
@@ -2248,6 +3093,51 @@ export default function HomePage() {
               </div>
 
               <div className="ml-auto flex shrink-0 gap-2">
+                <button className="rounded border px-3 py-1 text-sm" onClick={() => void saveItineraryToServer()}>
+                  儲存行程
+                </button>
+                <select
+                  className="rounded border px-2 py-1 text-sm"
+                  value={selectedItineraryId ?? ""}
+                  onChange={(event) => setSelectedItineraryId(Number(event.target.value) || null)}
+                >
+                  <option value="">選擇已儲存行程</option>
+                  {savedItineraries.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      #{item.id} {item.title || "未命名行程"}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="rounded border px-3 py-1 text-sm disabled:opacity-60"
+                  onClick={() => selectedItineraryId && void loadSavedItinerary(selectedItineraryId)}
+                  disabled={!selectedItineraryId || loadingSavedItinerary}
+                >
+                  {loadingSavedItinerary ? "載入中" : "載入行程"}
+                </button>
+                <button
+                  className="rounded border px-3 py-1 text-sm disabled:opacity-60"
+                  onClick={() => void reoptimizeItinerary()}
+                  disabled={optimizingItinerary}
+                >
+                  {optimizingItinerary ? "優化中" : "重新優化"}
+                </button>
+                <button
+                  className="rounded border px-3 py-1 text-sm disabled:opacity-60"
+                  onClick={applyOptimizationResult}
+                  disabled={!optimizationResult}
+                >
+                  套用優化排序
+                </button>
+                <button className="rounded border px-3 py-1 text-sm" onClick={exportItineraryAsPdf}>
+                  匯出 PDF
+                </button>
+                <button className="rounded border px-3 py-1 text-sm" onClick={exportItineraryAsImage}>
+                  匯出圖片
+                </button>
+                <button className="rounded border px-3 py-1 text-sm" onClick={() => void copyShareLink()}>
+                  分享連結
+                </button>
                 <button className="rounded border px-3 py-1 text-sm" onClick={() => setIsPendingModalOpen(true)}>
                   待安排清單
                 </button>
@@ -2283,7 +3173,52 @@ export default function HomePage() {
             )}
 
             {leftTab === "itinerary" && (
-              <div className="min-h-0 flex-1 overflow-auto">
+              <div
+                className="min-h-0 flex-1 overflow-auto"
+                onTouchStart={onItineraryTouchStart}
+                onTouchEnd={onItineraryTouchEnd}
+              >
+                {optimizationResult && (
+                  <div className="mb-3 rounded-xl border border-slate-200 p-3 text-sm">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <h3 className="text-base font-semibold">行程可行性報告</h3>
+                      <span
+                        className={`rounded px-2 py-0.5 text-xs ${
+                          optimizationResult.feasible ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
+                        }`}
+                      >
+                        {optimizationResult.feasible ? "可行" : "需調整"}
+                      </span>
+                      <span className="text-xs text-slate-500">總費用：{Math.round(Number(optimizationResult.total_cost || 0))} 元</span>
+                    </div>
+                    {Array.isArray(optimizationResult.warnings) && optimizationResult.warnings.length > 0 && (
+                      <ul className="mb-2 list-disc space-y-1 pl-5 text-amber-700">
+                        {optimizationResult.warnings.map((warning, idx) => (
+                          <li key={`global-warning-${idx}`}>{warning}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="space-y-2">
+                      {optimizationResult.days.map((day) => (
+                        <div key={`report-day-${day.day_number}`} className="rounded border border-slate-200 bg-slate-50 p-2">
+                          <div className="mb-1 flex flex-wrap items-center gap-2">
+                            <strong>Day {day.day_number}</strong>
+                            <span>交通總時長：{Math.round(Number(day.total_travel_minutes || 0))} 分鐘</span>
+                            <span>預估花費：{Math.round(Number(day.total_cost || 0))} 元</span>
+                          </div>
+                          {Array.isArray(day.warnings) && day.warnings.length > 0 && (
+                            <ul className="list-disc space-y-1 pl-5 text-amber-700">
+                              {day.warnings.map((warning, idx) => (
+                                <li key={`day-warning-${day.day_number}-${idx}`}>{warning}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="mb-3 rounded-xl border border-slate-200 p-3">
                   <h2 className="mb-2 text-base font-semibold">每日行程：{selectedDay.label}</h2>
 
@@ -2415,6 +3350,39 @@ export default function HomePage() {
                   </div>
                 </div>
 
+                <div className="mb-3 rounded-xl border border-slate-200 p-3 text-sm">
+                  <h3 className="mb-2 text-base font-semibold">行程時間軸</h3>
+                  {selectedDayTimeline.length === 0 ? (
+                    <p className="text-slate-500">目前沒有景點可顯示時間軸。</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {selectedDayTimeline.map((item, idx) => (
+                        <li key={`${item.placeId}-${idx}`} className="rounded border border-slate-200 bg-slate-50 px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <strong>{item.placeName}</strong>
+                            <span className="text-xs text-slate-600">
+                              {item.arrivalText} - {item.departText}
+                            </span>
+                            <span className="text-xs text-slate-500">停留 {item.stayMinutes} 分鐘</span>
+                          </div>
+                          {idx > 0 && (
+                            <p className="mt-1 text-xs text-slate-600">
+                              前段交通：{item.travelMinutesFromPrev} 分鐘（{item.travelModeFromPrev === "drive"
+                                ? "開車"
+                                : item.travelModeFromPrev === "transit"
+                                  ? "大眾運輸"
+                                  : item.travelModeFromPrev === "walk"
+                                    ? "步行"
+                                    : "騎車"}
+                              ）
+                            </p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+
                 <div className="rounded-xl border border-slate-200 p-3 text-sm">
                   <h3 className="mb-2 text-base font-semibold">預算資訊</h3>
                   {(state.budgetMode === "A" || state.budgetMode === "C") && (
@@ -2460,7 +3428,7 @@ export default function HomePage() {
           </div>
         </section>
 
-        <section className="relative rounded-xl border border-slate-200 bg-white p-3">
+        <section className="relative flex min-h-[420px] flex-col rounded-xl border border-slate-200 bg-white p-3 xl:min-h-0">
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={onMapSearchSubmit}>
               <div className="flex min-w-0 flex-1 items-center rounded border bg-white px-2">
@@ -2537,7 +3505,7 @@ export default function HomePage() {
             </div>
           )}
 
-          <div className="relative h-[calc(100%-54px)] overflow-hidden rounded-lg border">
+          <div className="relative min-h-[280px] flex-1 overflow-hidden rounded-lg border">
             <div ref={mapContainerRef} className="h-full w-full" />
             {mapError && (
               <div className="absolute left-3 top-3 rounded border border-red-200 bg-white px-3 py-2 text-xs text-red-600">

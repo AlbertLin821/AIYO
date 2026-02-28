@@ -1,0 +1,466 @@
+{
+  "run_id": "offline-baseline-2026-02-28T07-33-12-073Z",
+  "measured_at": "2026-02-28T07:34:59.467Z",
+  "gateway_base_url": "http://localhost:3001",
+  "dataset_path": "benchmark\\offline_golden_set.json",
+  "persisted_to_db": true,
+  "metrics": [
+    {
+      "metric_name": "offline_eval.overall_pass_rate",
+      "metric_value": 0.1111,
+      "sample_count": 9
+    },
+    {
+      "metric_name": "offline_eval.tool_expected_success_rate",
+      "metric_value": 0.5,
+      "sample_count": 4
+    },
+    {
+      "metric_name": "offline_eval.weather.pass_rate",
+      "metric_value": 0.3333,
+      "sample_count": 3
+    },
+    {
+      "metric_name": "offline_eval.city_recommend.pass_rate",
+      "metric_value": 0,
+      "sample_count": 3
+    },
+    {
+      "metric_name": "offline_eval.itinerary_preference.pass_rate",
+      "metric_value": 0,
+      "sample_count": 3
+    }
+  ],
+  "results": [
+    {
+      "case": {
+        "id": "weather_taipei_rain",
+        "category": "weather",
+        "message": "台北今天會下雨嗎？出門要不要帶傘？",
+        "city": "台北",
+        "expected_keywords": [
+          "台北",
+          "天氣"
+        ],
+        "min_keyword_hits": 1,
+        "expected_tool": "get_weather",
+        "min_recommendations": 0
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 2,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": true,
+        "expected_tool": "get_weather",
+        "tool_pass": false
+      },
+      "response": {
+        "reply": "目前無法取得台北的即時天氣資料，可能因地區名稱或工具限制導致查詢失敗。建議您透過氣象部門官網或天氣App確認最新預報，並準備雨具以備不時之需。天氣資訊可能隨時變動，出行前請再次確認哦！",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "get_weather",
+            "ok": false,
+            "source": "open-meteo",
+            "error": "geocoding no result",
+            "arguments": {
+              "location": "台北"
+            }
+          },
+          {
+            "tool": "get_weather",
+            "ok": false,
+            "source": "open-meteo",
+            "error": "geocoding no result",
+            "arguments": {}
+          },
+          {
+            "tool": "get_weather",
+            "ok": false,
+            "source": "open-meteo",
+            "error": "geocoding no result",
+            "arguments": {
+              "location": "台北"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "weather_kaohsiung_temp",
+        "category": "weather",
+        "message": "高雄現在氣溫大概幾度？",
+        "city": "高雄",
+        "expected_keywords": [
+          "高雄",
+          "天氣"
+        ],
+        "min_keyword_hits": 1,
+        "expected_tool": "get_weather",
+        "min_recommendations": 0
+      },
+      "evaluation": {
+        "pass": true,
+        "keyword_hits": 2,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": true,
+        "expected_tool": "get_weather",
+        "tool_pass": true
+      },
+      "response": {
+        "reply": "根據最新查詢結果，高雄目前的氣溫約為22.5°C（體感溫度24.9°C），目前無降水，風速約9.4m/s。由於天氣狀況可能隨時變化，建議您出行前再確認一次當前氣象資訊，以確保行程順利哦！",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "get_weather",
+            "ok": true,
+            "source": "open-meteo",
+            "error": null,
+            "arguments": {
+              "location": "高雄"
+            }
+          },
+          {
+            "tool": "get_weather",
+            "ok": true,
+            "source": "open-meteo",
+            "error": null,
+            "arguments": {}
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "weather_hualien_weekend",
+        "category": "weather",
+        "message": "這週末花蓮天氣適合戶外行程嗎？",
+        "city": "花蓮",
+        "expected_keywords": [
+          "花蓮",
+          "天氣"
+        ],
+        "min_keyword_hits": 1,
+        "expected_tool": "get_weather",
+        "min_recommendations": 0
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 2,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": true,
+        "expected_tool": "get_weather",
+        "tool_pass": false
+      },
+      "response": {
+        "reply": "目前無法取得花蓮的即時天氣資料，可能因地點名稱解析或工具限制導致查詢失敗。建議您透過氣象部門官網或天氣App確認最新預報，並準備雨具以備不時之需。天氣資訊可能隨時變動，出行前請再次確認哦！",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "get_weather",
+            "ok": false,
+            "source": "open-meteo",
+            "error": "geocoding no result",
+            "arguments": {
+              "location": "花蓮"
+            }
+          },
+          {
+            "tool": "get_weather",
+            "ok": false,
+            "source": "open-meteo",
+            "error": "geocoding no result",
+            "arguments": {
+              "location": "花蓮"
+            }
+          },
+          {
+            "tool": "get_weather",
+            "ok": false,
+            "source": "open-meteo",
+            "error": "geocoding no result",
+            "arguments": {
+              "location": "花蓮"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "city_recommend_tainan_food",
+        "category": "city_recommend",
+        "message": "推薦台南美食旅遊影片給我",
+        "city": "台南",
+        "expected_keywords": [
+          "台南",
+          "美食"
+        ],
+        "min_keyword_hits": 1,
+        "min_recommendations": 1
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 2,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": false,
+        "expected_tool": null,
+        "tool_pass": true
+      },
+      "response": {
+        "reply": "目前無法直接提供台南美食旅遊影片的連結，但可以推薦您一些台南必訪的美食地點與景點，並建議您透過YouTube或視頻平台搜尋相關主題：\n\n**台南美食推薦：**\n1. **夜市必吃**：仁德路夜市（蚵仔煎、大腸包小腸）、北門路小吃街（珍珠奶茶、擔仔麵）。\n2. **特色餐廳**：安平區的「安平古堡旁美食街」、永康區的「阿宗葉子酥」（傳統糕點）。\n3. **在地食材**：推薦嘗試虱目魚、擔擔麵、腸粉等台南特色料理。\n\n**視頻搜尋建議：**\n- 在YouTube搜尋「台南美食旅游」或「台南夜市推薦」，可找到許多遊客分享的實拍影片。\n- 注意查看影片的發布日期與評價，確保資訊新穎且符合您的需求。\n\n若需要更多行程規劃建議，歡迎隨時告訴我！ 🌧️🍜",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "search_youtube_videos",
+            "ok": false,
+            "source": "youtube",
+            "error": "missing YOUTUBE_API_KEY",
+            "arguments": {
+              "location": "台南",
+              "query": "台南美食旅游",
+              "max_results": 10
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "city_recommend_taichung_family",
+        "category": "city_recommend",
+        "message": "我想找台中親子旅遊推薦",
+        "city": "台中",
+        "expected_keywords": [
+          "台中",
+          "親子"
+        ],
+        "min_keyword_hits": 1,
+        "min_recommendations": 1
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 2,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": false,
+        "expected_tool": null,
+        "tool_pass": true
+      },
+      "response": {
+        "reply": "目前無法透過工具直接取得台中親子旅遊的最新推薦清單，但根據常見的親子友善景點與活動，以下提供一些參考建議（資訊可能隨時間調整，建議出行前再確認）：\n\n---\n\n### **台中親子旅遊推薦清單**\n1. **台中市立動物園**  \n   - 互動式動物餵食、兒童遊樂區、生態導覽，適合各年齡層。\n   - **注意**：部分展區可能需提前預約。\n\n2. **台中科學館（彩虹眷村）**  \n   - 趣味科學展覽與藝術彩繪牆，結合教育與創意，適合拍照與探索。\n\n3. **大里杙（舊稱「大里」）**  \n   - 保留傳統街區風貌，可體驗在地小吃（如大里肉圓）、老屋文化與手作工坊。\n\n4. **豐原老街**  \n   - 以傳統美食聞名（如豐原豆花、花生餅），並有懷舊街區與夜市氛圍。\n\n5. **國家歌劇院（台中）**  \n   - 有親子劇場活動與互動式展演，可查詢近期適合兒童的表演節目。\n\n---\n\n### **其他建議**\n- **交通**：台中市內可使用「台中交通卡」搭乘公車與捷運，或租用機車（需注意交通規則）。\n- **美食**：推薦嘗試「台中米其林推薦餐廳」或夜市小吃（如逢甲夜市、北屯夜市）。\n- **活動**：部分景點提供親子DIY工作坊（如陶藝、手工皂），可提前查詢開放時間。\n\n---\n\n### **注意事項**\n- 部分景點可能因節日、修繕或防疫措施調整營運狀況，建議透過官方網站或電話確認。\n- 若需視頻參考，可於YouTube搜尋「台中親子旅遊」或「台中景點」，但目前工具無法直接提供連結。\n\n如需更精準的推薦，可補充說明您的預算、孩子年齡或偏好類型（如自然、文化、美食等）！ 🌈",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "search_travel_information",
+            "ok": true,
+            "source": "duckduckgo",
+            "error": null,
+            "arguments": {
+              "query": "親子旅遊推薦",
+              "region": "台中",
+              "max_results": 5
+            }
+          },
+          {
+            "tool": "search_youtube_videos",
+            "ok": false,
+            "source": "youtube",
+            "error": "missing YOUTUBE_API_KEY",
+            "arguments": {
+              "location": "台中",
+              "max_results": 5,
+              "query": "親子旅遊"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "city_recommend_kaohsiung_budget",
+        "category": "city_recommend",
+        "message": "請推薦高雄適合小資族的旅遊內容",
+        "city": "高雄",
+        "expected_keywords": [
+          "高雄",
+          "小資"
+        ],
+        "min_keyword_hits": 1,
+        "min_recommendations": 1
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 2,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": false,
+        "expected_tool": null,
+        "tool_pass": true
+      },
+      "response": {
+        "reply": "目前無法透過工具取得高雄小資族旅遊的即時推薦清單，但根據常見的低成本活動與平價美食，為您整理以下建議（部分資訊可能隨時間調整，建議出行前再確認）：\n\n---\n\n### **高雄小資族必訪免費/平價景點**\n1. **高雄市立圖書館（三民區總館）**  \n   - 免費入場，內設書籍、藝文展覽與兒童閱讀區，還能體驗數位閱讀設備。  \n   - **小提醒**：週末常有親子工作坊，可提前查看行事曆。\n\n2. **高雄捷運「輕軌觀光」免費搭乘**  \n   - 每月第一個週日免費搭乘輕軌，可沿路觀賞高雄港、愛河與現代建築風景。  \n   - **延伸玩法**：搭配「高雄捷運APP」規劃路線，免費景點串聯更便利。\n\n3. **愛河畔步道（部分路段免費）**  \n   - 沿河散步、騎單車或租機車，感受高雄水岸風景。  \n   - **注意**：部分觀景台或停車場可能需收費，建議提前查證。\n\n---\n\n### **平價美食推薦（人均100-200元）**\n1. **六合夜市（平價小吃天堂）**  \n   - **必吃**：大腸包小腸（約30元）、蚵仔煎（約40元）、珍珠奶茶（約35元）。  \n   - **小技巧**：凌晨1-2點後攤位較少人，可避開人潮。\n\n2. **鼎泰豐（多個分店）**  \n   - 經典小籠包平價實惠（約100元/份），推薦搭配蒜泥味噌湯。  \n   - **注意**：部分分店可能需預訂，可透過Google地圖查看開放時間。\n\n3. **左營區「阿公的麵線」**  \n   - 本地人喜愛的傳統麵線，價格親民（約50元/碗），推薦加花生碎與蒜香醬。\n\n---\n\n### **其他小資族心法**\n- **交通**：優先使用高雄捷運（月票約300元/月）或租機車（日租約200元），避免計程車費用。  \n- **時間管理**：選擇「免費景點+平價美食」組合，例如：圖書館→愛河→六合夜市，控制總開支。  \n\n如需更精準的資訊，建議透過「高雄旅遊網」或在地粉絲專頁確認最新活動！ 🌟",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "search_travel_information",
+            "ok": true,
+            "source": "duckduckgo",
+            "error": null,
+            "arguments": {
+              "query": "高雄 小資族 台灣 旅遊推薦 免費景點 美食",
+              "region": "高雄",
+              "max_results": 5
+            }
+          },
+          {
+            "tool": "search_travel_information",
+            "ok": true,
+            "source": "duckduckgo",
+            "error": null,
+            "arguments": {
+              "query": "高雄 小資族 台灣 免費景點 平價美食",
+              "region": "高雄",
+              "max_results": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "itinerary_pref_tainan_2d",
+        "category": "itinerary_preference",
+        "message": "我想安排台南兩天一夜，偏好小吃和古蹟，預算不要太高",
+        "city": "台南",
+        "expected_keywords": [
+          "台南",
+          "行程",
+          "預算"
+        ],
+        "min_keyword_hits": 1,
+        "min_recommendations": 1
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 2,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": false,
+        "expected_tool": null,
+        "tool_pass": true
+      },
+      "response": {
+        "reply": "根據您的需求（台南兩日遊、偏好小吃與古蹟、預算不高），以下是精緻化推薦方案，部分資訊可能隨時間調整，建議出發前再次確認：\n\n---\n\n### **台南兩日遊規劃（小吃×古蹟）**\n#### **Day 1：古蹟探秘 + 晚間小吃**\n1. **早上：臺南市立歷史博物館（免費）**  \n   - 位於台南市中西區，結合古蹟與展覽，可了解台南歷史脈絡，內有「安平古堡」與「赤崁樓」的文物展示。\n   - **小提醒**：週一休館，建議早上9點前到達。\n\n2. **中午：大東門夜市（平價小吃）**  \n   - 頭份街與大東門路交會處，聚集多家平價美食，推薦：  \n     - **大腸包小腸**（炭烤腸香氣濃郁）  \n     - **蚵仔煎**（現煎現吃，酥脆多汁）  \n     - **擔仔麵**（加入花生碎與海苔，風味獨特）\n\n3. **下午：赤崁樓（免費）**  \n   - 台南最早的文化地標，周邊有「億載金城」與「孔子廟」，可感受清代古蹟風貌。\n\n4. **晚上：北門路小吃街（夜市必吃）**  \n   - 以珍珠奶茶聞名，推薦：  \n     - **阿宗葉子酥**（傳統糕點，酥皮內餡綿密）  \n     - **金華夜市**（距離北門路約10分鐘車程，人潮較少但選擇更多）\n\n---\n\n#### **Day 2：深度古蹟 + 民俗體驗**\n1. **早上：安平古堡（免費）**  \n   - 台南歷史象徵，可遠眺海景，建議搭配「億載金城」與「安平樹屋」同遊。  \n   - **小提醒**：古蹟區禁止攜帶攝影機，建議使用手機拍照。\n\n2. **中午：安平區美食街（平價海鮮）**  \n   - 推薦：  \n     - **安平港仔尾**（現撈海鮮，價位親民）  \n     - **紅毛城旁的蚵仔煎**（海風吹拂下的傳統小吃）\n\n3. **下午：延平郡王祠（免費）**  \n   - 位於安平區，為鄭成功紀念建築，周邊有「開山神社」與「億載金城」，適合靜心漫步。\n\n4. **晚上：河樂廣場（免費夜景）**  \n   - 夜間有燈光秀與市集，可搭配「河樂廣場」附近的「永康街」小吃，如：  \n     - **永康街肉圓**（Q彈口感）  \n     - **花生冰**（傳統甜品，夏日必吃）\n\n---\n\n### **預算建議（2人）**\n- **交通**：使用iBike租借自行車（每小時$20，2天約$80）或搭乘公車（$10/人）。  \n- **餐飲**：小吃與平價餐廳約$300-500，古蹟與博物館免費。  \n- **其他**：建議準備雨具（台南多雨），並下載「臺南觀光」APP查詢景點開放時間。\n\n---\n\n### **注意事項**\n1. **古蹟開放時間**：部分古蹟可能因修繕或活動調整開放時間，建議出發前確認。  \n2. **小吃人潮**：夜市建議錯開黃金時段（18:00-21:00），可選擇17:00後到達。  \n3. **天氣**：台南多雨，建議攜帶輕便雨具，並關注氣象部門預報。\n\n希望這份規劃能讓您玩得盡興又省錢！如有其他需求，歡迎隨時補充～ 🌧️🍜🏯",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "search_travel_information",
+            "ok": true,
+            "source": "duckduckgo",
+            "error": null,
+            "arguments": {
+              "query": "台南 古蹟 小吃",
+              "region": "台南",
+              "max_results": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "itinerary_pref_taipei_relax",
+        "category": "itinerary_preference",
+        "message": "幫我規劃台北一天慢遊行程，節奏輕鬆，盡量搭大眾運輸",
+        "city": "台北",
+        "expected_keywords": [
+          "台北",
+          "行程",
+          "輕鬆"
+        ],
+        "min_keyword_hits": 1,
+        "min_recommendations": 1
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 3,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": false,
+        "expected_tool": null,
+        "tool_pass": true
+      },
+      "response": {
+        "reply": "根據您的需求（台北一日慢遊、輕鬆節奏 + 大眾運輸），以下是精心設計的行程建議（部分資訊可能隨時間調整，建議出發前確認）：\n\n---\n\n### **台北一日慢遊行程（輕鬆版）**\n**交通重點**：捷運（台北捷運） + 公車，全程步行距離短於10分鐘  \n**節奏**：每處景點停留40-60分鐘，避免長時間移動  \n\n---\n\n#### **上午：文化與歷史（9:00-12:00）**\n1. **中正紀念堂**（免費）  \n   - 位於市中心，周邊有「國父紀念館」與「中正公園」，可感受歷史氛圍與綠意空間。  \n   - **交通**：搭乘捷運「中正紀念堂站」2號出口，步行5分鐘。  \n\n2. **台北故事館**（免費，需預約）  \n   - 位於中正紀念堂旁，透過互動展覽了解台北城市歷史，適合拍照與放慢步調。  \n   - **小提醒**：建議預約後再前往，避免人潮。  \n\n---\n\n#### **中午：在地美食（12:00-13:30）**\n- **寧夏夜市**（平日較少人潮）  \n  - 走訪「永康街」或「宁夏路」，推薦：  \n    - **大腸包小腸**（老店推薦：阿宗葉子酥）  \n    - **蚵仔煎**（可選無蛋版本更清爽）  \n  - **交通**：搭乘捷運「永康站」2號出口，步行10分鐘。  \n\n---\n\n#### **下午：自然與藝術（14:00-17:00）**\n1. **台北101觀景台**（費用約NT$450）  \n   - 搭乘觀景台電梯（約10秒）俯瞰城市，可於118樓「空中花園」休憩。  \n   - **交通**：搭乘捷運「台北101/世貿站」，步行5分鐘。  \n\n2. **西門町商圈**（免費）  \n   - 漫步於復古街道，可到「西門紅樓」拍照，或在「寧夏街」的咖啡廳小憩。  \n   - **小提醒**：避免過度購物，保持輕鬆步調。  \n\n---\n\n#### **傍晚：日落與夜市（17:30-19:00）**\n- **士林官邸**（免費）  \n  - 漫步在日式庭園與歷史建築間，傍晚時分可欣賞夕陽與湖景。  \n  - **交通**：搭乘捷運「士林站」，步行10分鐘。  \n\n---\n\n### **其他建議**\n- **交通卡**：使用「悠遊卡」或「icash」搭乘捷運與公車，儲值後可享折扣。  \n- **備註**：若想更輕鬆，可將「台北101」換成「圓山大飯店」（免費）或「二二八紀念公園」（免費）。  \n\n---\n\n**提醒**：部分景點可能因活動或修繕調整開放時間，建議出發前透過官網或APP確認！需要更詳細的交通路線或美食推薦可隨時告訴我 😊",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "search_travel_information",
+            "ok": true,
+            "source": "duckduckgo",
+            "error": null,
+            "arguments": {
+              "query": "台北一日慢游行程 大众运输",
+              "region": "台北市",
+              "max_results": 5
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case": {
+        "id": "itinerary_pref_hsinchu_rain",
+        "category": "itinerary_preference",
+        "message": "新竹下雨天可以怎麼安排半天室內行程？",
+        "city": "新竹",
+        "expected_keywords": [
+          "新竹",
+          "室內",
+          "行程"
+        ],
+        "min_keyword_hits": 1,
+        "expected_tool": "get_weather",
+        "min_recommendations": 1
+      },
+      "evaluation": {
+        "pass": false,
+        "keyword_hits": 3,
+        "keyword_pass": true,
+        "recommendation_count": 0,
+        "recommendation_pass": false,
+        "expected_tool": "get_weather",
+        "tool_pass": true
+      },
+      "response": {
+        "reply": "根據天氣資訊，新竹目前為小雨天氣（降水0.1mm），建議安排室內活動。以下是結合預算與輕鬆節奏的推薦：\n\n---\n\n### **新竹雨天半天室內行程（輕鬆版）**\n**交通**：捷運/公車 + 步行（全區步行距離＜10分鐘）  \n**節奏**：每處停留40-60分鐘，避免長時間移動  \n**注意**：部分資訊可能隨時間調整，建議出發前確認  \n\n---\n\n#### **上午：文化探索**\n1. **新竹市立圖書館（免費）**  \n   - 免費入場，內有書籍、藝文展覽與兒童閱讀區，還能體驗數位閱讀設備。  \n   - **特色**：館內有「新竹地景藝術」常設展，結合在地文化與藝術。  \n\n2. **新竹縣立文化中心（免費）**  \n   - 位於新竹市區，內有展覽空間與多功能廳，常舉辦文創市集與藝文活動。  \n   - **小提醒**：可搭配「新竹縣文化局」官網查詢即時展覽資訊。  \n\n---\n\n#### **下午：輕食與休憩**\n1. **新竹市立科學館（免費）**  \n   - 內有互動式科學展覽與兒童遊樂區，適合放鬆與親子共遊。  \n   - **注意**：部分展區可能需預約，建議提前確認。  \n\n2. **在地輕食推薦（預算友好）**  \n   - **新竹米粉**：推薦「阿明米粉」或「阿珍米粉」，價格約NT$50-80，可搭配熱飲。  \n   - **咖啡廳**：「新竹車站附近」有多間平價咖啡廳，如「Café de Soleil」，可作為休憩點。  \n\n---\n\n### **其他選擇（視時間調整）**\n- **新竹故宮分館（免費）**：若對美術館感興趣，可安排最後半小時參觀。  \n- **新竹市立體育場（免費）**：若想活動筋骨，可選擇室內運動場地。  \n\n---\n\n**小提醒**：  \n- 雨天建議攜帶輕便雨具，並留意館內開放時間。  \n- 若遇特別活動（如展覽延期），可臨時調整行程至其他室內場地。  \n\n希望這份行程能讓您在雨天也能享受新竹的文化與美食！ 🌧️📚🍜",
+        "recommended_videos_count": 0,
+        "tool_calls_summary": [
+          {
+            "tool": "search_travel_information",
+            "ok": true,
+            "source": "duckduckgo",
+            "error": null,
+            "arguments": {
+              "query": "室內景點 半天",
+              "region": "新竹"
+            }
+          },
+          {
+            "tool": "get_weather",
+            "ok": true,
+            "source": "open-meteo",
+            "error": null,
+            "arguments": {}
+          }
+        ]
+      }
+    }
+  ]
+}

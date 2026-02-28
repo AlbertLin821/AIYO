@@ -1,6 +1,8 @@
+import crypto from "crypto";
 import cors from "cors";
 import express from "express";
 import http from "http";
+import jwt from "jsonwebtoken";
 import morgan from "morgan";
 import * as Sentry from "@sentry/node";
 import client from "prom-client";
@@ -66,6 +68,11 @@ app.use((req, res, next) => {
 const wss = new WebSocketServer({ noServer: true });
 const sessionClients = new Map();
 const ACCESS_TOKEN_SKEW_SEC = 20;
+const DEFAULT_TOOL_POLICY = {
+  enabled: true,
+  weather_use_current_location: true,
+  tool_trigger_rules: "遇到即時資訊問題（天氣、營業時間、交通、票價、活動）時優先查工具。"
+};
 
 function parseCookies(req) {
   const header = req.headers.cookie || "";
@@ -109,6 +116,79 @@ function clearRefreshTokenCookie(res) {
     parts.push("Secure");
   }
   res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function sanitizeToolPolicy(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ...DEFAULT_TOOL_POLICY };
+  }
+  return {
+    enabled: typeof input.enabled === "boolean" ? input.enabled : DEFAULT_TOOL_POLICY.enabled,
+    weather_use_current_location:
+      typeof input.weather_use_current_location === "boolean"
+        ? input.weather_use_current_location
+        : DEFAULT_TOOL_POLICY.weather_use_current_location,
+    tool_trigger_rules:
+      typeof input.tool_trigger_rules === "string" && input.tool_trigger_rules.trim()
+        ? input.tool_trigger_rules.trim().slice(0, 1000)
+        : DEFAULT_TOOL_POLICY.tool_trigger_rules
+  };
+}
+
+function round4(value) {
+  return Math.round(Number(value || 0) * 10000) / 10000;
+}
+
+async function fetchWeeklyCtrTrend({ weeks, userId }) {
+  const safeWeeks = Math.min(26, Math.max(2, Number(weeks) || 8));
+  const whereUser = Number.isFinite(userId) ? "AND user_id = $2" : "";
+  const params = Number.isFinite(userId) ? [safeWeeks, userId] : [safeWeeks];
+  const result = await pool.query(
+    `
+    WITH week_series AS (
+      SELECT (date_trunc('week', NOW()) - (gs * INTERVAL '1 week'))::date AS week_start
+      FROM generate_series(0, $1 - 1) AS gs
+    ),
+    agg AS (
+      SELECT
+        date_trunc('week', created_at)::date AS week_start,
+        COUNT(*) FILTER (WHERE event_type = 'impression')::int AS impressions,
+        COUNT(*) FILTER (WHERE event_type = 'click')::int AS clicks,
+        COUNT(DISTINCT user_id)::int AS unique_users
+      FROM recommendation_events
+      WHERE created_at >= date_trunc('week', NOW()) - (($1 - 1) * INTERVAL '1 week')
+        ${whereUser}
+      GROUP BY 1
+    )
+    SELECT
+      ws.week_start,
+      COALESCE(agg.impressions, 0)::int AS impressions,
+      COALESCE(agg.clicks, 0)::int AS clicks,
+      COALESCE(agg.unique_users, 0)::int AS unique_users
+    FROM week_series ws
+    LEFT JOIN agg ON agg.week_start = ws.week_start
+    ORDER BY ws.week_start ASC
+    `,
+    params
+  );
+  const weekly = [];
+  let previousCtr = null;
+  for (const row of result.rows || []) {
+    const impressions = Number(row.impressions || 0);
+    const clicks = Number(row.clicks || 0);
+    const ctr = impressions > 0 ? round4(clicks / impressions) : 0;
+    const wow = previousCtr === null ? null : round4(ctr - previousCtr);
+    weekly.push({
+      week_start: row.week_start,
+      impressions,
+      clicks,
+      unique_users: Number(row.unique_users || 0),
+      ctr,
+      wow_ctr_change: wow
+    });
+    previousCtr = ctr;
+  }
+  return weekly;
 }
 
 app.get("/health", (_req, res) => {
@@ -319,6 +399,79 @@ app.put("/api/user/profile", requireAuth, async (req, res) => {
   res.json({ profile: result.rows[0] });
 });
 
+app.get("/api/user/ai-settings", requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `
+    SELECT user_id, tool_policy_json, weather_default_region, auto_use_current_location, current_lat, current_lng, current_region, updated_at
+    FROM user_ai_settings
+    WHERE user_id = $1
+    `,
+    [req.user.id]
+  );
+  if (!result.rows[0]) {
+    const created = await pool.query(
+      `
+      INSERT INTO user_ai_settings (user_id, tool_policy_json)
+      VALUES ($1, $2::jsonb)
+      ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+      RETURNING user_id, tool_policy_json, weather_default_region, auto_use_current_location, current_lat, current_lng, current_region, updated_at
+      `,
+      [req.user.id, JSON.stringify(DEFAULT_TOOL_POLICY)]
+    );
+    res.json({ settings: created.rows[0] });
+    return;
+  }
+  res.json({ settings: result.rows[0] });
+});
+
+app.put("/api/user/ai-settings", requireAuth, async (req, res) => {
+  const { toolPolicy, weatherDefaultRegion, autoUseCurrentLocation } = req.body || {};
+  const normalizedPolicy = sanitizeToolPolicy(toolPolicy);
+  const result = await pool.query(
+    `
+    INSERT INTO user_ai_settings (
+      user_id, tool_policy_json, weather_default_region, auto_use_current_location, updated_at
+    ) VALUES ($1, $2::jsonb, $3, COALESCE($4, TRUE), NOW())
+    ON CONFLICT (user_id) DO UPDATE SET
+      tool_policy_json = COALESCE(EXCLUDED.tool_policy_json, user_ai_settings.tool_policy_json),
+      weather_default_region = COALESCE(EXCLUDED.weather_default_region, user_ai_settings.weather_default_region),
+      auto_use_current_location = COALESCE(EXCLUDED.auto_use_current_location, user_ai_settings.auto_use_current_location),
+      updated_at = NOW()
+    RETURNING user_id, tool_policy_json, weather_default_region, auto_use_current_location, current_lat, current_lng, current_region, updated_at
+    `,
+    [
+      req.user.id,
+      JSON.stringify(normalizedPolicy),
+      weatherDefaultRegion ? String(weatherDefaultRegion).slice(0, 120) : null,
+      typeof autoUseCurrentLocation === "boolean" ? autoUseCurrentLocation : null
+    ]
+  );
+  res.json({ settings: result.rows[0] });
+});
+
+app.put("/api/user/location", requireAuth, async (req, res) => {
+  const { lat, lng, region } = req.body || {};
+  const hasLatLng = Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
+  const normalizedLat = hasLatLng ? Number(lat) : null;
+  const normalizedLng = hasLatLng ? Number(lng) : null;
+  const normalizedRegion = region ? String(region).trim().slice(0, 120) : null;
+  const result = await pool.query(
+    `
+    INSERT INTO user_ai_settings (
+      user_id, tool_policy_json, current_lat, current_lng, current_region, updated_at
+    ) VALUES ($1, $2::jsonb, $3, $4, $5, NOW())
+    ON CONFLICT (user_id) DO UPDATE SET
+      current_lat = COALESCE(EXCLUDED.current_lat, user_ai_settings.current_lat),
+      current_lng = COALESCE(EXCLUDED.current_lng, user_ai_settings.current_lng),
+      current_region = COALESCE(EXCLUDED.current_region, user_ai_settings.current_region),
+      updated_at = NOW()
+    RETURNING user_id, tool_policy_json, weather_default_region, auto_use_current_location, current_lat, current_lng, current_region, updated_at
+    `,
+    [req.user.id, JSON.stringify(DEFAULT_TOOL_POLICY), normalizedLat, normalizedLng, normalizedRegion]
+  );
+  res.json({ settings: result.rows[0] });
+});
+
 app.get("/api/user/memory", requireAuth, async (req, res) => {
   const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20));
   const result = await pool.query(
@@ -360,6 +513,110 @@ app.post("/api/user/memory/rebuild", requireAuth, async (req, res) => {
       error: "AI 記憶巡檢失敗",
       detail: error instanceof Error ? error.message : "unknown error"
     });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Recommendation event tracking
+// ---------------------------------------------------------------------------
+
+app.post("/api/recommendation/event", requireAuth, async (req, res) => {
+  const {
+    event_type, session_id, query_text, query_intent, tool_source,
+    video_id, segment_id, youtube_id, rank_position, rank_score,
+    recommendation_reason, location_source, personalization_signals,
+    feedback_action, dwell_time_ms
+  } = req.body || {};
+  const validTypes = ["impression", "click", "segment_jump", "itinerary_adopt", "dismiss"];
+  if (!event_type || !validTypes.includes(event_type)) {
+    res.status(400).json({ error: `event_type must be one of: ${validTypes.join(", ")}` });
+    return;
+  }
+  try {
+    await pool.query(
+      `INSERT INTO recommendation_events
+        (user_id, session_id, event_type, query_text, query_intent, tool_source,
+         video_id, segment_id, youtube_id, rank_position, rank_score,
+         recommendation_reason, location_source, personalization_signals,
+         feedback_action, dwell_time_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16)`,
+      [
+        req.user.id,
+        session_id || null,
+        event_type,
+        query_text || null,
+        query_intent || null,
+        tool_source || null,
+        video_id || null,
+        segment_id || null,
+        youtube_id || null,
+        rank_position ?? null,
+        rank_score ?? null,
+        recommendation_reason || null,
+        location_source || null,
+        JSON.stringify(personalization_signals || {}),
+        feedback_action || null,
+        dwell_time_ms ?? null
+      ]
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("[recommendation_event] insert failed:", error.message);
+    res.status(500).json({ error: "event insert failed" });
+  }
+});
+
+app.get("/api/recommendation/metrics", requireAuth, async (req, res) => {
+  const days = Math.min(90, Math.max(1, parseInt(req.query.days) || 7));
+  try {
+    const result = await pool.query(
+      `SELECT
+         event_type,
+         COUNT(*) AS count,
+         COUNT(DISTINCT user_id) AS unique_users,
+         AVG(rank_score) AS avg_rank_score,
+         AVG(dwell_time_ms) FILTER (WHERE dwell_time_ms > 0) AS avg_dwell_ms
+       FROM recommendation_events
+       WHERE created_at >= NOW() - make_interval(days => $1)
+         AND user_id = $2
+       GROUP BY event_type
+       ORDER BY count DESC`,
+      [days, req.user.id]
+    );
+    const impressions = result.rows.find(r => r.event_type === "impression");
+    const clicks = result.rows.find(r => r.event_type === "click");
+    const impressionCount = parseInt(impressions?.count || "0");
+    const clickCount = parseInt(clicks?.count || "0");
+    const ctr = impressionCount > 0 ? (clickCount / impressionCount) : 0;
+
+    res.json({
+      days,
+      events: result.rows,
+      summary: {
+        total_impressions: impressionCount,
+        total_clicks: clickCount,
+        click_through_rate: round4(ctr)
+      }
+    });
+  } catch (error) {
+    console.error("[recommendation_metrics] query failed:", error.message);
+    res.status(500).json({ error: "metrics query failed" });
+  }
+});
+
+app.get("/api/recommendation/ctr-weekly", requireAuth, async (req, res) => {
+  const weeks = Math.min(26, Math.max(2, parseInt(req.query.weeks) || 8));
+  try {
+    const weekly = await fetchWeeklyCtrTrend({ weeks, userId: req.user.id });
+    res.json({
+      weeks,
+      scope: "user",
+      user_id: req.user.id,
+      weekly
+    });
+  } catch (error) {
+    console.error("[recommendation_ctr_weekly] query failed:", error.message);
+    res.status(500).json({ error: "ctr weekly query failed" });
   }
 });
 
@@ -426,6 +683,8 @@ app.delete("/api/chat/history/:sessionId", requireAuth, async (req, res) => {
 app.post("/api/chat", requireAuth, async (req, res) => {
   const body = req.body || {};
   const sessionId = body.sessionId || `user-${req.user.id}`;
+  const traceId = generateTraceId();
+  const chatStartMs = Date.now();
   const chatSessionDbId = await ensureChatSession(req.user.id, sessionId);
   const incomingMessages = normalizeChatMessages(body.messages);
   const cachedHistory = await getSessionHistory(sessionId);
@@ -444,13 +703,15 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "x-trace-id": traceId,
       ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
     },
     body: JSON.stringify({
       ...body,
       messages: mergedHistory,
       session_id: sessionId,
-      user_id: req.user.id
+      user_id: req.user.id,
+      trace_id: traceId
     })
   });
 
@@ -462,6 +723,18 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       fallback: true
     });
     await setSessionHistory(sessionId, fallbackHistory, 3600);
+    insertAuditLog({
+      traceId,
+      userId: req.user.id,
+      sessionId,
+      endpoint: "/api/chat",
+      method: "POST",
+      statusCode: response.status || 502,
+      requestJson: { message: body.message, model: body.model },
+      responseJson: { fallback: true },
+      errorText: "ai-service unavailable, used fallback reply",
+      durationMs: Date.now() - chatStartMs
+    }).catch(() => {});
     if (body.stream === false) {
       res.json({
         reply: fallbackReply,
@@ -499,6 +772,18 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         3600
       );
     }
+    insertAuditLog({
+      traceId,
+      userId: req.user.id,
+      sessionId,
+      endpoint: "/api/chat",
+      method: "POST",
+      statusCode: response.status,
+      requestJson: { message: body.message, model: body.model, city: body.city, stream: body.stream },
+      responseJson: { reply_length: String(data.reply || "").length, tool_calls_summary: data.tool_calls_summary },
+      toolCallsJson: data.tool_calls_summary || [],
+      durationMs: Date.now() - chatStartMs
+    }).catch(() => {});
     res.json(data);
     return;
   }
@@ -542,6 +827,17 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         3600
       );
     }
+    insertAuditLog({
+      traceId,
+      userId: req.user.id,
+      sessionId,
+      endpoint: "/api/chat",
+      method: "POST",
+      statusCode: 200,
+      requestJson: { message: body.message, model: body.model, city: body.city, stream: body.stream },
+      responseJson: { assistant_text_length: assistantText.length, recommended_videos_count: recommendedVideos.length },
+      durationMs: Date.now() - chatStartMs
+    }).catch(() => {});
     res.end();
   }
 });
@@ -570,25 +866,180 @@ app.post("/api/search-segments", requireAuth, async (req, res) => {
   res.status(response.status).json(data);
 });
 
-app.post("/api/itinerary", requireAuth, async (req, res) => {
-  const { sessionId, title, daysCount = 1, status = "draft" } = req.body || {};
-  const resolvedSessionId = sessionId || `user-${req.user.id}`;
+function normalizeItineraryDays(rawDays) {
+  if (!Array.isArray(rawDays)) {
+    return [];
+  }
+  return rawDays
+    .map((day, dayIndex) => {
+      if (!day || typeof day !== "object") {
+        return null;
+      }
+      const dateLabel = String(day.date_label || day.label || "").trim();
+      const rawSlots = Array.isArray(day.slots) ? day.slots : [];
+      const slots = rawSlots
+        .map((slot, slotIndex) => {
+          if (!slot || typeof slot !== "object") {
+            return null;
+          }
+          const placeName = String(slot.place_name || slot.name || "").trim();
+          if (!placeName) {
+            return null;
+          }
+          return {
+            place_name: placeName,
+            place_id: Number(slot.place_id) || null,
+            segment_id: Number(slot.segment_id) || null,
+            slot_order: Number.isFinite(Number(slot.slot_order)) ? Number(slot.slot_order) : slotIndex + 1,
+            time_range_start: slot.time_range_start || null,
+            time_range_end: slot.time_range_end || null
+          };
+        })
+        .filter(Boolean);
+      return {
+        day_number: Number.isFinite(Number(day.day_number)) ? Number(day.day_number) : dayIndex + 1,
+        date_label: dateLabel || null,
+        slots
+      };
+    })
+    .filter(Boolean);
+}
+
+async function replaceItineraryDaysAndSlots(client, itineraryId, normalizedDays) {
+  await client.query(
+    `DELETE FROM itinerary_slots
+     WHERE day_id IN (
+       SELECT id FROM itinerary_days WHERE itinerary_id = $1
+     )`,
+    [itineraryId]
+  );
+  await client.query("DELETE FROM itinerary_days WHERE itinerary_id = $1", [itineraryId]);
+
+  for (const day of normalizedDays) {
+    const dayResult = await client.query(
+      `
+      INSERT INTO itinerary_days (itinerary_id, day_number, date_label)
+      VALUES ($1, $2, $3)
+      RETURNING id
+      `,
+      [itineraryId, day.day_number, day.date_label]
+    );
+    const dayId = dayResult.rows[0]?.id;
+    if (!dayId) {
+      continue;
+    }
+    for (const slot of day.slots) {
+      await client.query(
+        `
+        INSERT INTO itinerary_slots
+          (day_id, time_range_start, time_range_end, place_name, place_id, segment_id, slot_order)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `,
+        [
+          dayId,
+          slot.time_range_start,
+          slot.time_range_end,
+          slot.place_name,
+          slot.place_id,
+          slot.segment_id,
+          slot.slot_order
+        ]
+      );
+    }
+  }
+}
+
+app.get("/api/itinerary", requireAuth, async (req, res) => {
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
   const result = await pool.query(
     `
-    INSERT INTO itineraries (session_id, user_id, title, days_count, status)
-    VALUES ($1, $2, $3, $4, $5)
-    RETURNING *
+    SELECT id, session_id, title, days_count, status, created_at, updated_at
+    FROM itineraries
+    WHERE user_id = $1
+    ORDER BY updated_at DESC, id DESC
+    LIMIT $2
     `,
-    [resolvedSessionId, req.user.id, title || null, Number(daysCount) || 1, status]
+    [req.user.id, limit]
   );
+  res.json({ items: result.rows, total: result.rows.length });
+});
+
+app.post("/api/itinerary/reoptimize", requireAuth, async (req, res) => {
+  const body = req.body || {};
+  const days = Math.min(14, Math.max(1, Number(body.days) || 1));
+  const segments = Array.isArray(body.segments) ? body.segments : [];
+  const preferences = Array.isArray(body.preferences) ? body.preferences : [];
+  const mustVisit = Array.isArray(body.mustVisit) ? body.mustVisit : [];
+  const avoid = Array.isArray(body.avoid) ? body.avoid : [];
+  const payload = {
+    days,
+    segments,
+    preferences,
+    user_id: req.user.id,
+    budget_total: Number(body.budgetTotal) > 0 ? Number(body.budgetTotal) : null,
+    budget_per_day: Number(body.budgetPerDay) > 0 ? Number(body.budgetPerDay) : null,
+    must_visit: mustVisit,
+    avoid
+  };
+
+  try {
+    const response = await fetch(`${config.aiServiceUrl}/api/tools/plan-itinerary`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
+      },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    res.status(response.status).json(data);
+  } catch (error) {
+    console.error("[itinerary_reoptimize] request failed:", error.message);
+    res.status(502).json({ error: "reoptimize request failed" });
+  }
+});
+
+app.post("/api/itinerary", requireAuth, async (req, res) => {
+  const { sessionId, title, daysCount = 1, status = "draft", days = [] } = req.body || {};
+  const resolvedSessionId = sessionId || `user-${req.user.id}`;
+  const normalizedDays = normalizeItineraryDays(days);
+  const client = await pool.connect();
+  let created = null;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `
+      INSERT INTO itineraries (session_id, user_id, title, days_count, status)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [resolvedSessionId, req.user.id, title || null, Number(daysCount) || 1, status]
+    );
+    created = result.rows[0] || null;
+    if (created && normalizedDays.length > 0) {
+      await replaceItineraryDaysAndSlots(client, created.id, normalizedDays);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("[itinerary_create] failed:", error.message);
+    res.status(500).json({ error: "itinerary create failed" });
+    client.release();
+    return;
+  }
+  client.release();
+  if (!created) {
+    res.status(500).json({ error: "itinerary create failed" });
+    return;
+  }
   if (resolvedSessionId) {
     broadcastToSession(resolvedSessionId, {
       type: "itinerary_update",
       action: "created",
-      itinerary: result.rows[0]
+      itinerary: created
     });
   }
-  res.status(201).json(result.rows[0]);
+  res.status(201).json(created);
 });
 
 app.get("/api/itinerary/:id", requireAuth, async (req, res) => {
@@ -599,36 +1050,78 @@ app.get("/api/itinerary/:id", requireAuth, async (req, res) => {
     return;
   }
   const days = await pool.query("SELECT * FROM itinerary_days WHERE itinerary_id = $1 ORDER BY day_number ASC", [id]);
-  res.json({ ...itinerary.rows[0], days: days.rows });
+  const dayIds = days.rows.map((row) => row.id);
+  let slots = [];
+  if (dayIds.length > 0) {
+    const slotResult = await pool.query(
+      `
+      SELECT id, day_id, time_range_start, time_range_end, place_name, place_id, segment_id, slot_order
+      FROM itinerary_slots
+      WHERE day_id = ANY($1::int[])
+      ORDER BY day_id ASC, slot_order ASC, id ASC
+      `,
+      [dayIds]
+    );
+    slots = slotResult.rows;
+  }
+  const slotByDayId = new Map();
+  for (const slot of slots) {
+    const group = slotByDayId.get(slot.day_id) || [];
+    group.push(slot);
+    slotByDayId.set(slot.day_id, group);
+  }
+  const daysWithSlots = days.rows.map((day) => ({
+    ...day,
+    slots: slotByDayId.get(day.id) || []
+  }));
+  res.json({ ...itinerary.rows[0], days: daysWithSlots });
 });
 
 app.put("/api/itinerary/:id", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
-  const { title, daysCount, status } = req.body || {};
-  const result = await pool.query(
-    `
-    UPDATE itineraries
-    SET title = COALESCE($2, title),
-        days_count = COALESCE($3, days_count),
-        status = COALESCE($4, status),
-        updated_at = NOW()
-    WHERE id = $1 AND user_id = $5
-    RETURNING *
-    `,
-    [id, title ?? null, daysCount ?? null, status ?? null, req.user.id]
-  );
-  if (!result.rows[0]) {
+  const { title, daysCount, status, days } = req.body || {};
+  const normalizedDays = normalizeItineraryDays(days);
+  const client = await pool.connect();
+  let updated = null;
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `
+      UPDATE itineraries
+      SET title = COALESCE($2, title),
+          days_count = COALESCE($3, days_count),
+          status = COALESCE($4, status),
+          updated_at = NOW()
+      WHERE id = $1 AND user_id = $5
+      RETURNING *
+      `,
+      [id, title ?? null, daysCount ?? null, status ?? null, req.user.id]
+    );
+    updated = result.rows[0] || null;
+    if (updated && Array.isArray(days)) {
+      await replaceItineraryDaysAndSlots(client, id, normalizedDays);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("[itinerary_update] failed:", error.message);
+    res.status(500).json({ error: "itinerary update failed" });
+    client.release();
+    return;
+  }
+  client.release();
+  if (!updated) {
     res.status(404).json({ error: "itinerary not found" });
     return;
   }
-  if (result.rows[0].session_id) {
-    broadcastToSession(result.rows[0].session_id, {
+  if (updated.session_id) {
+    broadcastToSession(updated.session_id, {
       type: "itinerary_update",
       action: "updated",
-      itinerary: result.rows[0]
+      itinerary: updated
     });
   }
-  res.json(result.rows[0]);
+  res.json(updated);
 });
 
 app.delete("/api/itinerary/:id", requireAuth, async (req, res) => {
@@ -1046,6 +1539,348 @@ function mergeRecommendedVideos(current, incoming) {
   }
   return Array.from(map.values()).slice(0, 5);
 }
+
+// ---------------------------------------------------------------------------
+// Developer console helpers
+// ---------------------------------------------------------------------------
+
+const DEV_ADMIN_EMAIL = "admin@gmail.com";
+const DEV_ADMIN_PASSWORD = "adminadmin";
+const DEV_JWT_SECRET = config.jwtSecret + "_dev";
+const SENSITIVE_KEYS = new Set([
+  "password", "password_hash", "token", "access_token", "refresh_token",
+  "authorization", "cookie", "set-cookie", "x-internal-token",
+  "secret", "api_key", "apikey"
+]);
+
+function maskSensitivePayload(obj, depth = 0) {
+  if (depth > 8 || obj === null || obj === undefined) return obj;
+  if (typeof obj === "string") return obj;
+  if (Array.isArray(obj)) {
+    return obj.map((item) => maskSensitivePayload(item, depth + 1));
+  }
+  if (typeof obj === "object") {
+    const masked = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+        masked[key] = typeof value === "string" && value.length > 0 ? "***MASKED***" : value;
+      } else {
+        masked[key] = maskSensitivePayload(value, depth + 1);
+      }
+    }
+    return masked;
+  }
+  return obj;
+}
+
+function generateTraceId() {
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+}
+
+async function insertAuditLog({
+  traceId, userId, sessionId, endpoint, method, statusCode,
+  requestJson, responseJson, aiPromptJson, aiResponseJson,
+  toolCallsJson, errorText, durationMs
+}) {
+  try {
+    const maskedReq = maskSensitivePayload(requestJson);
+    const maskedRes = maskSensitivePayload(responseJson);
+    const maskedPrompt = maskSensitivePayload(aiPromptJson);
+    const maskedAiRes = maskSensitivePayload(aiResponseJson);
+    const maskedTools = maskSensitivePayload(toolCallsJson);
+    await pool.query(
+      `INSERT INTO developer_audit_logs
+        (trace_id, user_id, session_id, endpoint, method, status_code,
+         request_json, response_json, ai_prompt_json, ai_response_json,
+         tool_calls_json, error_text, duration_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13)`,
+      [
+        traceId || null,
+        userId || null,
+        sessionId || null,
+        endpoint || null,
+        method || null,
+        statusCode || null,
+        JSON.stringify(maskedReq || {}),
+        JSON.stringify(maskedRes || {}),
+        JSON.stringify(maskedPrompt || {}),
+        JSON.stringify(maskedAiRes || {}),
+        JSON.stringify(maskedTools || []),
+        errorText || null,
+        durationMs || null
+      ]
+    );
+  } catch (e) {
+    console.error("[audit] insert failed:", e.message);
+  }
+}
+
+async function insertDevLoginEvent({ email, success, ip, userAgent }) {
+  try {
+    await pool.query(
+      "INSERT INTO developer_login_events (email, success, ip_address, user_agent) VALUES ($1,$2,$3,$4)",
+      [email, success, ip || null, userAgent || null]
+    );
+  } catch (e) {
+    console.error("[audit] login event insert failed:", e.message);
+  }
+}
+
+function signDevToken(email) {
+  return jwt.sign({ email, role: "dev_admin" }, DEV_JWT_SECRET, { expiresIn: "8h" });
+}
+
+function requireDevAdmin(req, res, next) {
+  if (process.env.NODE_ENV === "production") {
+    res.status(403).json({ error: "dev console disabled in production" });
+    return;
+  }
+  try {
+    const raw = req.headers.authorization;
+    const header = Array.isArray(raw) ? raw[0] : raw || "";
+    if (!header.startsWith("Bearer ")) {
+      res.status(401).json({ error: "missing dev token" });
+      return;
+    }
+    const token = header.slice(7).trim();
+    const payload = jwt.verify(token, DEV_JWT_SECRET);
+    if (payload.role !== "dev_admin") throw new Error("bad role");
+    req.devAdmin = { email: payload.email };
+    next();
+  } catch {
+    res.status(401).json({ error: "invalid dev token" });
+  }
+}
+
+// --- Dev auth routes ---
+
+app.post("/api/dev/login", async (req, res) => {
+  if (process.env.NODE_ENV === "production") {
+    res.status(403).json({ error: "dev console disabled in production" });
+    return;
+  }
+  const { email, password } = req.body || {};
+  const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "";
+  const ua = req.headers["user-agent"] || "";
+  if (email === DEV_ADMIN_EMAIL && password === DEV_ADMIN_PASSWORD) {
+    await insertDevLoginEvent({ email, success: true, ip, userAgent: ua });
+    const token = signDevToken(email);
+    res.json({ token, email });
+  } else {
+    await insertDevLoginEvent({ email: email || "", success: false, ip, userAgent: ua });
+    res.status(401).json({ error: "invalid credentials" });
+  }
+});
+
+app.post("/api/dev/logout", requireDevAdmin, (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.get("/api/dev/me", requireDevAdmin, (req, res) => {
+  res.json({ email: req.devAdmin.email, role: "dev_admin" });
+});
+
+// --- Quality dashboard ---
+
+app.get("/api/dev/quality-dashboard", requireDevAdmin, async (_req, res) => {
+  try {
+    const recEvents = await pool.query(`
+      SELECT event_type, COUNT(*) AS count
+      FROM recommendation_events
+      WHERE created_at >= NOW() - INTERVAL '7 days'
+      GROUP BY event_type
+      ORDER BY count DESC
+    `);
+    const impressions = parseInt(recEvents.rows.find(r => r.event_type === "impression")?.count || "0");
+    const clicks = parseInt(recEvents.rows.find(r => r.event_type === "click")?.count || "0");
+    const segJumps = parseInt(recEvents.rows.find(r => r.event_type === "segment_jump")?.count || "0");
+
+    const toolSuccess = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE (tool_calls_json::text) LIKE '%"ok": true%' OR (tool_calls_json::text) LIKE '%"ok":true%') AS success_count,
+        COUNT(*) AS total_count
+      FROM developer_audit_logs
+      WHERE created_at >= NOW() - INTERVAL '7 days'
+        AND endpoint = '/api/chat'
+        AND tool_calls_json IS NOT NULL
+        AND tool_calls_json::text != '[]'
+    `);
+    const toolTotal = parseInt(toolSuccess.rows[0]?.total_count || "0");
+    const toolOk = parseInt(toolSuccess.rows[0]?.success_count || "0");
+
+    const chatPerf = await pool.query(`
+      SELECT
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY duration_ms) AS p50_ms,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms,
+        AVG(duration_ms) AS avg_ms,
+        COUNT(*) AS total_requests
+      FROM developer_audit_logs
+      WHERE created_at >= NOW() - INTERVAL '7 days'
+        AND endpoint = '/api/chat'
+        AND duration_ms IS NOT NULL
+    `);
+
+    const activeUsers = await pool.query(`
+      SELECT COUNT(DISTINCT user_id) AS count
+      FROM developer_audit_logs
+      WHERE created_at >= NOW() - INTERVAL '7 days'
+        AND user_id IS NOT NULL
+    `);
+
+    const ctrWeekly = await fetchWeeklyCtrTrend({ weeks: 8 });
+
+    res.json({
+      period: "last 7 days",
+      recommendation: {
+        events: recEvents.rows,
+        impressions,
+        clicks,
+        segment_jumps: segJumps,
+        ctr: impressions > 0 ? round4(clicks / impressions) : 0,
+        ctr_weekly: ctrWeekly
+      },
+      tool_calling: {
+        total: toolTotal,
+        success: toolOk,
+        success_rate: toolTotal > 0 ? round4(toolOk / toolTotal) : 0,
+      },
+      chat_performance: chatPerf.rows[0] || {},
+      active_users: parseInt(activeUsers.rows[0]?.count || "0"),
+    });
+  } catch (error) {
+    console.error("[quality-dashboard] query failed:", error.message);
+    res.status(500).json({ error: "dashboard query failed" });
+  }
+});
+
+app.get("/api/dev/recommendation/ctr-weekly", requireDevAdmin, async (req, res) => {
+  const weeks = Math.min(26, Math.max(2, parseInt(req.query.weeks) || 8));
+  try {
+    const weekly = await fetchWeeklyCtrTrend({ weeks });
+    res.json({
+      weeks,
+      scope: "global",
+      weekly
+    });
+  } catch (error) {
+    console.error("[dev_recommendation_ctr_weekly] query failed:", error.message);
+    res.status(500).json({ error: "dev ctr weekly query failed" });
+  }
+});
+
+// --- Dev data routes ---
+
+app.get("/api/dev/users", requireDevAdmin, async (_req, res) => {
+  const result = await pool.query(
+    `SELECT u.id, u.email, u.created_at,
+            p.display_name, p.bio
+     FROM users u
+     LEFT JOIN user_profiles p ON p.user_id = u.id
+     ORDER BY u.id`
+  );
+  res.json({ users: result.rows });
+});
+
+app.get("/api/dev/users/:id/profile", requireDevAdmin, async (req, res) => {
+  const uid = Number(req.params.id);
+  const [userRow, profileRow, aiRow] = await Promise.all([
+    pool.query("SELECT id, email, created_at FROM users WHERE id = $1", [uid]),
+    pool.query("SELECT * FROM user_profiles WHERE user_id = $1", [uid]),
+    pool.query("SELECT * FROM user_ai_settings WHERE user_id = $1", [uid])
+  ]);
+  if (!userRow.rows[0]) { res.status(404).json({ error: "user not found" }); return; }
+  res.json({
+    user: userRow.rows[0],
+    profile: profileRow.rows[0] || null,
+    ai_settings: aiRow.rows[0] || null
+  });
+});
+
+app.get("/api/dev/users/:id/memories", requireDevAdmin, async (req, res) => {
+  const uid = Number(req.params.id);
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const result = await pool.query(
+    "SELECT * FROM user_memories WHERE user_id = $1 ORDER BY updated_at DESC LIMIT $2",
+    [uid, limit]
+  );
+  res.json({ memories: result.rows });
+});
+
+app.get("/api/dev/users/:id/chat-sessions", requireDevAdmin, async (req, res) => {
+  const uid = Number(req.params.id);
+  const limit = Math.min(Number(req.query.limit) || 30, 100);
+  const result = await pool.query(
+    `SELECT s.id, s.user_id, s.external_session_id AS session_id, s.title, s.created_at,
+            (SELECT MAX(m.created_at) FROM chat_messages m WHERE m.session_id = s.id) AS updated_at
+     FROM chat_sessions s WHERE s.user_id = $1
+     ORDER BY updated_at DESC NULLS LAST, s.created_at DESC LIMIT $2`,
+    [uid, limit]
+  );
+  res.json({ sessions: result.rows });
+});
+
+app.get("/api/dev/users/:id/chat-history/:sessionId", requireDevAdmin, async (req, res) => {
+  const uid = Number(req.params.id);
+  const sessionId = req.params.sessionId;
+  const sessionRow = await pool.query(
+    "SELECT id FROM chat_sessions WHERE user_id = $1 AND external_session_id = $2",
+    [uid, sessionId]
+  );
+  if (!sessionRow.rows[0]) {
+    res.json({ messages: [] });
+    return;
+  }
+  const result = await pool.query(
+    `SELECT m.id, m.role, m.content, m.meta_json AS metadata, m.created_at
+     FROM chat_messages m
+     WHERE m.session_id = $1
+     ORDER BY m.id ASC`,
+    [sessionRow.rows[0].id]
+  );
+  res.json({ messages: result.rows });
+});
+
+app.get("/api/dev/users/:id/itineraries", requireDevAdmin, async (req, res) => {
+  const uid = Number(req.params.id);
+  const result = await pool.query(
+    "SELECT * FROM itineraries WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50",
+    [uid]
+  );
+  res.json({ itineraries: result.rows });
+});
+
+app.get("/api/dev/audit-logs", requireDevAdmin, async (req, res) => {
+  const { user_id, endpoint, trace_id, from, to, limit: rawLimit, offset: rawOffset } = req.query;
+  const limit = Math.min(Number(rawLimit) || 50, 200);
+  const offset = Number(rawOffset) || 0;
+  const conditions = [];
+  const params = [];
+  let idx = 1;
+  if (user_id) { conditions.push(`user_id = $${idx++}`); params.push(Number(user_id)); }
+  if (endpoint) { conditions.push(`endpoint ILIKE $${idx++}`); params.push(`%${endpoint}%`); }
+  if (trace_id) { conditions.push(`trace_id = $${idx++}`); params.push(trace_id); }
+  if (from) { conditions.push(`created_at >= $${idx++}`); params.push(from); }
+  if (to) { conditions.push(`created_at <= $${idx++}`); params.push(to); }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const countResult = await pool.query(`SELECT COUNT(*) AS total FROM developer_audit_logs ${where}`, params);
+  params.push(limit, offset);
+  const result = await pool.query(
+    `SELECT * FROM developer_audit_logs ${where} ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+    params
+  );
+  res.json({ total: Number(countResult.rows[0].total), logs: result.rows });
+});
+
+app.get("/api/dev/login-events", requireDevAdmin, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const result = await pool.query(
+    "SELECT * FROM developer_login_events ORDER BY created_at DESC LIMIT $1",
+    [limit]
+  );
+  res.json({ events: result.rows });
+});
+
+// ---------------------------------------------------------------------------
 
 function normalizeChatMessages(messages) {
   if (!Array.isArray(messages)) {
