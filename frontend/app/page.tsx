@@ -1,8 +1,23 @@
 "use client";
 
-import { FormEvent, TouchEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Suspense, TouchEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { AppSidebar } from "@/components/layout/AppSidebar";
+import { TopBar } from "@/components/layout/TopBar";
+import { ChatPanel } from "@/components/chat/ChatPanel";
+import { TripPanel } from "@/components/trip/TripPanel";
+import { VideoPlayerModal } from "@/components/video/VideoPanel";
+import { Tabs } from "@/components/ui/tabs";
+import { Modal, ModalHeader, ModalBody } from "@/components/ui/modal";
+import { MessageCircle, Search, Heart } from "lucide-react";
+import {
+  API_BASE_URL,
+  getAccessToken,
+  getAuthHeaders,
+  refreshAccessToken,
+  apiFetchWithAuth,
+} from "@/lib/api";
 
 type TransportMode = "drive" | "transit" | "walk" | "bike";
 type BudgetMode = "A" | "B" | "C";
@@ -211,6 +226,24 @@ function createDefaultDayLabel(baseDate = new Date()): string {
   return `${y}/${m}/${d} (${weekdayText[baseDate.getDay()]})`;
 }
 
+function parseDateFromDayLabel(label: string): Date | null {
+  const match = /^(\d{4})\/(\d{2})\/(\d{2})/.exec(label);
+  if (!match) return null;
+  const y = Number(match[1]);
+  const m = Number(match[2]) - 1;
+  const d = Number(match[3]);
+  const date = new Date(y, m, d);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function toDateInputValue(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 function createInitialState(): PlannerState {
   return {
     days: [{ id: "day1", label: createDefaultDayLabel(), placeIds: [] }],
@@ -319,8 +352,41 @@ function remapTransportModes(
 
 const CHAT_MEMORY_LIMIT = 20;
 const INITIAL_CHAT_MESSAGES: ChatMessage[] = [];
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001").replace(/\/$/, "");
 const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+const CHAT_SESSION_STORAGE_KEY = "aiyo_chat_session_id";
+const ACTIVE_ITINERARY_STORAGE_KEY = "aiyo_active_itinerary_id";
+
+function getStoredChatSessionId(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const stored = window.localStorage.getItem(CHAT_SESSION_STORAGE_KEY);
+  return (stored && stored.trim()) ? stored.trim() : "";
+}
+
+function persistChatSessionId(sessionId: string): void {
+  if (typeof window === "undefined" || !sessionId.trim()) {
+    return;
+  }
+  window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, sessionId.trim());
+}
+
+function getStoredActiveItineraryId(): number | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const raw = window.localStorage.getItem(ACTIVE_ITINERARY_STORAGE_KEY);
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function persistActiveItineraryId(id: number): void {
+  if (typeof window === "undefined" || !Number.isFinite(id) || id <= 0) {
+    return;
+  }
+  window.localStorage.setItem(ACTIVE_ITINERARY_STORAGE_KEY, String(id));
+}
 
 function createSessionId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -360,13 +426,6 @@ function loadGoogleMapsApi(): Promise<typeof google> {
   });
 
   return window.__googleMapsScriptLoadingPromise;
-}
-
-function getAccessToken(): string {
-  if (typeof window === "undefined") {
-    return "";
-  }
-  return window.localStorage.getItem("aiyo_token") ?? "";
 }
 
 function buildWsUrl(token: string): string {
@@ -413,105 +472,7 @@ function escapeHtml(input: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function formatInlineMarkdown(input: string): string {
-  return input
-    .replace(/`([^`]+)`/g, "<code class=\"rounded bg-slate-100 px-1 py-0.5 font-mono text-xs\">$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(
-      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-      "<a href=\"$2\" target=\"_blank\" rel=\"noreferrer\" class=\"underline text-blue-700\">$1</a>"
-    );
-}
-
-function markdownToSafeHtml(markdown: string): string {
-  const normalized = escapeHtml(markdown.replace(/\r\n/g, "\n"));
-  const codeBlocks: string[] = [];
-  const withCodePlaceholder = normalized.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    const langText = lang ? `<div class="mb-1 text-xs text-slate-500">${lang}</div>` : "";
-    const html = `<pre class="my-2 overflow-auto rounded bg-slate-900 p-2 text-slate-100"><code>${langText}${code.trim()}</code></pre>`;
-    const token = `@@CODE_BLOCK_${codeBlocks.length}@@`;
-    codeBlocks.push(html);
-    return token;
-  });
-
-  const lines = withCodePlaceholder.split("\n");
-  const parts: string[] = [];
-  let inUl = false;
-  let inOl = false;
-
-  const closeLists = () => {
-    if (inUl) {
-      parts.push("</ul>");
-      inUl = false;
-    }
-    if (inOl) {
-      parts.push("</ol>");
-      inOl = false;
-    }
-  };
-
-  for (const line of lines) {
-    const text = line.trim();
-    if (!text) {
-      closeLists();
-      continue;
-    }
-    if (text.startsWith("@@CODE_BLOCK_")) {
-      closeLists();
-      parts.push(text);
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.*)$/.exec(text);
-    if (heading) {
-      closeLists();
-      const level = heading[1].length;
-      parts.push(`<h${level} class="my-1 font-semibold">${formatInlineMarkdown(heading[2])}</h${level}>`);
-      continue;
-    }
-
-    const ordered = /^\d+\.\s+(.*)$/.exec(text);
-    if (ordered) {
-      if (inUl) {
-        parts.push("</ul>");
-        inUl = false;
-      }
-      if (!inOl) {
-        parts.push("<ol class=\"my-1 list-decimal pl-5\">");
-        inOl = true;
-      }
-      parts.push(`<li>${formatInlineMarkdown(ordered[1])}</li>`);
-      continue;
-    }
-
-    const unordered = /^[-*]\s+(.*)$/.exec(text);
-    if (unordered) {
-      if (inOl) {
-        parts.push("</ol>");
-        inOl = false;
-      }
-      if (!inUl) {
-        parts.push("<ul class=\"my-1 list-disc pl-5\">");
-        inUl = true;
-      }
-      parts.push(`<li>${formatInlineMarkdown(unordered[1])}</li>`);
-      continue;
-    }
-
-    closeLists();
-    parts.push(`<p class="my-1">${formatInlineMarkdown(text)}</p>`);
-  }
-  closeLists();
-
-  let html = parts.join("");
-  codeBlocks.forEach((item, index) => {
-    html = html.replace(`@@CODE_BLOCK_${index}@@`, item);
-  });
-  return html;
-}
-
-export default function HomePage() {
+function HomePageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [history, setHistory] = useState<PlannerState[]>([createInitialState()]);
@@ -528,6 +489,9 @@ export default function HomePage() {
   const [dayContextMenu, setDayContextMenu] = useState<{ dayId: string; x: number; y: number } | null>(null);
   const [openMoveMenuKey, setOpenMoveMenuKey] = useState<string | null>(null);
   const [isPendingModalOpen, setIsPendingModalOpen] = useState(false);
+  const [isDateEditModalOpen, setIsDateEditModalOpen] = useState(false);
+  const [dateEditValue, setDateEditValue] = useState("");
+  const [dateEditDayId, setDateEditDayId] = useState<string | null>(null);
   const [leftTab, setLeftTab] = useState<"itinerary" | "ai">("itinerary");
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [chatInput, setChatInput] = useState("");
@@ -536,12 +500,17 @@ export default function HomePage() {
   const [chatDegraded, setChatDegraded] = useState(false);
   const [toolCallSummaries, setToolCallSummaries] = useState<ToolCallSummary[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
-  const [chatSessionId, setChatSessionId] = useState(() => createSessionId());
+  const [chatSessionId, setChatSessionId] = useState(() => {
+    const stored = getStoredChatSessionId();
+    return stored || "";
+  });
   const sessionFromUrl = searchParams.get("session");
   const itineraryFromUrl = searchParams.get("itineraryId");
   useEffect(() => {
     if (sessionFromUrl && sessionFromUrl.trim()) {
-      setChatSessionId(sessionFromUrl.trim());
+      const id = sessionFromUrl.trim();
+      persistChatSessionId(id);
+      setChatSessionId(id);
     }
   }, [sessionFromUrl]);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
@@ -614,9 +583,47 @@ export default function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authReady, itineraryFromUrl]);
 
+  useEffect(() => {
+    if (!authReady || itineraryFromUrl) {
+      return;
+    }
+    const storedId = getStoredActiveItineraryId();
+    if (storedId === null) {
+      return;
+    }
+    void loadSavedItinerary(storedId);
+    // loadSavedItinerary depends on runtime state and is intentionally re-bound per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
+
   const state = history[historyIndex];
   const selectedDay = state.days.find((day) => day.id === state.selectedDayId) ?? state.days[0];
   const selectedPlace = places.find((item) => item.id === selectedPlaceId);
+
+  const itineraryContentKey = useMemo(
+    () =>
+      JSON.stringify({
+        days: state.days.map((d) => ({ id: d.id, placeIds: d.placeIds })),
+        pending: state.pendingPlaceIds
+      }),
+    [state.days, state.pendingPlaceIds]
+  );
+
+  useEffect(() => {
+    if (!authReady || !chatSessionId) {
+      return;
+    }
+    const hasContent =
+      state.days.some((d) => d.placeIds.length > 0) || state.pendingPlaceIds.length > 0;
+    if (!hasContent) {
+      return;
+    }
+    const t = setTimeout(() => {
+      void saveItineraryToServer();
+    }, 3000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- itineraryContentKey drives debounced save
+  }, [authReady, chatSessionId, itineraryContentKey]);
 
   const usedOrRecommendedIds = useMemo(() => {
     const ids = new Set<string>();
@@ -1158,51 +1165,6 @@ export default function HomePage() {
     }
   }
 
-  function getAuthHeaders(extra?: Record<string, string>, tokenOverride?: string): Record<string, string> {
-    const token = tokenOverride ?? getAccessToken();
-    return {
-      ...(extra ?? {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
-    };
-  }
-
-  async function refreshAccessToken(): Promise<string> {
-    const response = await fetch(`${API_BASE_URL}/api/auth/refresh`, {
-      method: "POST",
-      credentials: "include"
-    });
-    if (!response.ok) {
-      throw new Error("refresh failed");
-    }
-    const data = (await response.json().catch(() => ({}))) as { token?: string; access_token?: string };
-    const token = data.access_token || data.token || "";
-    if (!token) {
-      throw new Error("refresh token missing");
-    }
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem("aiyo_token", token);
-    }
-    return token;
-  }
-
-  async function apiFetchWithAuth(url: string, init?: RequestInit, allowRetry = true): Promise<Response> {
-    const token = getAccessToken();
-    const response = await fetch(url, {
-      ...(init ?? {}),
-      credentials: "include",
-      headers: getAuthHeaders((init?.headers as Record<string, string> | undefined) ?? {}, token || "")
-    });
-    if (response.status !== 401 || !allowRetry) {
-      return response;
-    }
-    const refreshedToken = await refreshAccessToken();
-    return fetch(url, {
-      ...(init ?? {}),
-      credentials: "include",
-      headers: getAuthHeaders((init?.headers as Record<string, string> | undefined) ?? {}, refreshedToken)
-    });
-  }
-
   useEffect(() => {
     if (!authReady) {
       return;
@@ -1480,7 +1442,14 @@ export default function HomePage() {
           return;
         }
         if (data.user?.id) {
-          setChatSessionId(`user-${data.user.id}-default`);
+          const stored = getStoredChatSessionId();
+          if (!stored) {
+            const defaultId = `user-${data.user.id}-default`;
+            persistChatSessionId(defaultId);
+            setChatSessionId(defaultId);
+          } else {
+            setChatSessionId(stored);
+          }
         }
         setAuthEmail(data.user?.email ?? "");
         setAuthReady(true);
@@ -1827,6 +1796,60 @@ export default function HomePage() {
       draft.transportModes = remapTransportModes(draft.transportModes, idMap);
       draft.selectedDayId = idMap[selectedBefore] ?? days[0].id;
     });
+  }
+
+  function updateStartDate(startDate: Date) {
+    if (Number.isNaN(startDate.getTime())) return;
+    const weekdayText = ["日", "一", "二", "三", "四", "五", "六"];
+    commit((draft) => {
+      draft.days = draft.days.map((day, index) => {
+        const d = new Date(startDate);
+        d.setDate(d.getDate() + index);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const dayNum = String(d.getDate()).padStart(2, "0");
+        const label = `${y}/${m}/${dayNum} (${weekdayText[d.getDay()]})`;
+        return { ...day, label };
+      });
+    });
+  }
+
+  function updateDayLabel(dayId: string, newLabel: string) {
+    commit((draft) => {
+      draft.days = draft.days.map((day) =>
+        day.id === dayId ? { ...day, label: newLabel } : day
+      );
+    });
+  }
+
+  function openDateEditModal() {
+    setDateEditDayId(null);
+    const first = state.days[0];
+    const date = first ? parseDateFromDayLabel(first.label) : null;
+    setDateEditValue(date ? toDateInputValue(date) : toDateInputValue(new Date()));
+    setIsDateEditModalOpen(true);
+  }
+
+  function openDateEditModalForDay(dayId: string) {
+    const day = state.days.find((d) => d.id === dayId);
+    const date = day ? parseDateFromDayLabel(day.label) : null;
+    setDateEditDayId(dayId);
+    setDateEditValue(date ? toDateInputValue(date) : toDateInputValue(new Date()));
+    setIsDateEditModalOpen(true);
+  }
+
+  function confirmDateEdit() {
+    const [y, m, d] = dateEditValue.split("-").map(Number);
+    if (!y || !m || !d) return;
+    const date = new Date(y, m - 1, d);
+    if (Number.isNaN(date.getTime())) return;
+    if (dateEditDayId) {
+      updateDayLabel(dateEditDayId, createDefaultDayLabel(date));
+    } else {
+      updateStartDate(date);
+    }
+    setIsDateEditModalOpen(false);
+    setDateEditDayId(null);
   }
 
   function addToDayOrPending(placeId: string, target: string) {
@@ -2187,6 +2210,39 @@ export default function HomePage() {
     return placeId;
   }
 
+  function upsertSearchResultPlace(result: MapSearchResult): string {
+    const existed = places.find((p) => p.id === result.id);
+    if (existed) {
+      return existed.id;
+    }
+    places.push({
+      id: result.id,
+      name: result.name,
+      intro: "",
+      address: result.address,
+      phone: "",
+      website: "",
+      rating: result.rating ?? 0,
+      hours: "",
+      reasons: [],
+      notes: [],
+      stayMinutes: 60,
+      estimatedCost: 0,
+      recommended: false,
+      x: 0,
+      y: 0,
+      lat: result.lat,
+      lng: result.lng,
+      googleComments: []
+    });
+    return result.id;
+  }
+
+  function addSearchResultToDayOrPending(result: MapSearchResult, target: string) {
+    const placeId = upsertSearchResultPlace(result);
+    addToDayOrPending(placeId, target);
+  }
+
   async function loadSavedItinerary(itineraryId: number) {
     if (!authReady || !itineraryId || loadingSavedItinerary) {
       return;
@@ -2224,10 +2280,13 @@ export default function HomePage() {
         draft.transportModes = {};
       });
       if (typeof data.session_id === "string" && data.session_id.trim()) {
-        setChatSessionId(data.session_id.trim());
+        const sid = data.session_id.trim();
+        persistChatSessionId(sid);
+        setChatSessionId(sid);
       }
       setActiveItineraryId(itineraryId);
       setSelectedItineraryId(itineraryId);
+      persistActiveItineraryId(itineraryId);
       setAiSettingsNotice("已載入已儲存行程。");
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "載入已儲存行程失敗");
@@ -2260,6 +2319,7 @@ export default function HomePage() {
         if (typeof data.id === "number") {
           setActiveItineraryId(data.id);
           setSelectedItineraryId(data.id);
+          persistActiveItineraryId(data.id);
         }
         setChatError(null);
         setAiSettingsNotice("行程已儲存至伺服器。");
@@ -2632,1057 +2692,453 @@ export default function HomePage() {
     }
   }
 
-  const chatPanel = (
-    <div className="flex h-full min-h-0 flex-col rounded-xl border border-slate-200 bg-white p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <strong>AI 對話推薦</strong>
-        <div className="flex items-center gap-2">
-          <button
-            className="rounded border px-2 py-1 text-sm"
-            type="button"
-            onClick={() => router.push("/chat/sessions")}
-          >
-            歷史對話
-          </button>
-          <button
-            className="rounded border px-2 py-1 text-sm disabled:opacity-60"
-            onClick={clearChatHistory}
-            disabled={chatLoading}
-          >
-            清除歷史
-          </button>
-          <button className="rounded border px-2 py-1 text-sm" onClick={() => setChatCollapsed((v) => !v)}>
-            {chatCollapsed ? "展開" : "收合"}
-          </button>
-        </div>
-      </div>
-      {!chatCollapsed && (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="mb-2 rounded border border-slate-200 p-2 text-sm">
-            <p className="mb-2 font-medium">個人化偏好（Skill）</p>
-            <form className="grid grid-cols-1 gap-2 md:grid-cols-3" onSubmit={onSaveProfile}>
-              <input
-                className="rounded border px-2 py-1"
-                value={profile.travel_style ?? ""}
-                onChange={(event) => setProfile((prev) => ({ ...prev, travel_style: event.target.value }))}
-                placeholder="旅遊風格（文青、親子、美食）"
-                disabled={profileLoading || profileSaving}
-              />
-              <input
-                className="rounded border px-2 py-1"
-                value={profile.budget_pref ?? ""}
-                onChange={(event) => setProfile((prev) => ({ ...prev, budget_pref: event.target.value }))}
-                placeholder="預算偏好（高/中/低）"
-                disabled={profileLoading || profileSaving}
-              />
-              <input
-                className="rounded border px-2 py-1"
-                value={profile.pace_pref ?? ""}
-                onChange={(event) => setProfile((prev) => ({ ...prev, pace_pref: event.target.value }))}
-                placeholder="行程節奏（慢/中/快）"
-                disabled={profileLoading || profileSaving}
-              />
-              <input
-                className="rounded border px-2 py-1"
-                value={profile.transport_pref ?? ""}
-                onChange={(event) => setProfile((prev) => ({ ...prev, transport_pref: event.target.value }))}
-                placeholder="交通偏好（開車/大眾運輸）"
-                disabled={profileLoading || profileSaving}
-              />
-              <input
-                className="rounded border px-2 py-1"
-                value={profile.dietary_pref ?? ""}
-                onChange={(event) => setProfile((prev) => ({ ...prev, dietary_pref: event.target.value }))}
-                placeholder="飲食限制（不吃牛、全素）"
-                disabled={profileLoading || profileSaving}
-              />
-              <button className="rounded border px-2 py-1 disabled:opacity-60" type="submit" disabled={profileLoading || profileSaving}>
-                {profileSaving ? "儲存中" : "儲存偏好"}
-              </button>
-            </form>
-            <div className="mt-2 rounded bg-slate-50 p-2">
-              <p className="mb-2 text-xs font-medium text-slate-700">AI 工具策略設定</p>
-              <form className="mb-2 space-y-2" onSubmit={onSaveAiSettings}>
-                <label className="flex items-center gap-2 text-xs text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={aiSettings.tool_policy_json?.enabled ?? true}
-                    onChange={(event) =>
-                      setAiSettings((prev) => ({
-                        ...prev,
-                        tool_policy_json: {
-                          ...(prev.tool_policy_json || {}),
-                          enabled: event.target.checked
-                        }
-                      }))
-                    }
-                    disabled={aiSettingsSaving}
-                  />
-                  啟用模型工具呼叫
-                </label>
-                <label className="flex items-center gap-2 text-xs text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={aiSettings.auto_use_current_location ?? true}
-                    onChange={(event) => setAiSettings((prev) => ({ ...prev, auto_use_current_location: event.target.checked }))}
-                    disabled={aiSettingsSaving}
-                  />
-                  天氣查詢未指定地點時，自動使用目前位置
-                </label>
-                <input
-                  className="w-full rounded border px-2 py-1 text-xs"
-                  value={aiSettings.weather_default_region ?? ""}
-                  onChange={(event) => setAiSettings((prev) => ({ ...prev, weather_default_region: event.target.value }))}
-                  placeholder="預設地區（例如：台北）"
-                  disabled={aiSettingsSaving}
-                />
-                <textarea
-                  className="w-full rounded border px-2 py-1 text-xs"
-                  rows={3}
-                  value={aiSettings.tool_policy_json?.tool_trigger_rules ?? ""}
-                  onChange={(event) =>
-                    setAiSettings((prev) => ({
-                      ...prev,
-                      tool_policy_json: {
-                        ...(prev.tool_policy_json || {}),
-                        tool_trigger_rules: event.target.value
-                      }
-                    }))
-                  }
-                  placeholder="自訂工具觸發規則"
-                  disabled={aiSettingsSaving}
-                />
-                <div className="flex items-center gap-2">
-                  <button className="rounded border px-2 py-1 text-xs disabled:opacity-60" type="submit" disabled={aiSettingsSaving}>
-                    {aiSettingsSaving ? "儲存中" : "儲存 AI 工具設定"}
-                  </button>
-                  <button
-                    className="rounded border px-2 py-1 text-xs disabled:opacity-60"
-                    type="button"
-                    onClick={() => void syncCurrentLocation()}
-                    disabled={aiSettingsSaving}
-                  >
-                    重新抓取目前位置
-                  </button>
-                </div>
-              </form>
-              {aiSettingsNotice && <p className="mb-1 text-xs text-emerald-700">{aiSettingsNotice}</p>}
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <p className="text-xs text-slate-500">近期記憶</p>
-                <button
-                  type="button"
-                  className="rounded border px-2 py-0.5 text-xs disabled:opacity-60"
-                  onClick={() => void runAiMemoryReview()}
-                  disabled={memoryReviewing || profileLoading}
-                >
-                  {memoryReviewing ? "巡檢中" : "AI 檢查偏好"}
-                </button>
-              </div>
-              <p className="mb-1 text-xs text-slate-600">每次送出訊息後會自動巡檢長期偏好（固定啟用）。</p>
-              {memoryNotice && <p className="mb-1 text-xs text-emerald-700">{memoryNotice}</p>}
-              {memoryItems.length === 0 ? (
-                <p className="text-xs text-slate-500">尚無記憶資料。</p>
-              ) : (
-                <ul className="space-y-1 text-xs">
-                  {memoryItems.map((item) => (
-                    <li key={item.id} className="rounded border bg-white px-2 py-1">
-                      [{item.memory_type}] {item.memory_text}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
-            <label className="text-slate-600">模型</label>
-            <select
-              className="rounded border px-2 py-1 disabled:opacity-60"
-              value={selectedModel}
-              onChange={(event) => setSelectedModel(event.target.value)}
-              disabled={chatLoading || modelsLoading || modelOptions.length === 0}
-            >
-              {modelOptions.length === 0 && <option value="">{modelsLoading ? "載入中" : "無可用模型"}</option>}
-              {modelOptions.map((option) => (
-                <option key={option.name} value={option.name}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
-            <span className="text-xs text-slate-500">記憶上限：最近 {CHAT_MEMORY_LIMIT} 則訊息</span>
-          </div>
-          <div ref={chatScrollRef} className="mb-2 min-h-0 flex-1 overflow-auto rounded border bg-slate-50 p-2 text-sm">
-            {chatMessages.map((message, index) => (
-              <div
-                key={`${message.role}-${index}`}
-                className={`mb-2 rounded px-2 py-1 ${
-                  message.role === "user" ? "ml-8 bg-slate-900 text-white" : "mr-8 bg-white"
-                }`}
-              >
-                <p className={`mb-1 text-xs ${message.role === "user" ? "text-slate-200" : "text-slate-500"}`}>
-                  {message.role === "user" ? "你" : message.role === "assistant" ? "AI" : "系統"}
-                </p>
-                <div
-                  className={message.role === "user" ? "text-white" : "text-slate-900"}
-                  dangerouslySetInnerHTML={{
-                    __html: markdownToSafeHtml(message.content || (chatLoading && index === chatMessages.length - 1 ? "..." : ""))
-                  }}
-                />
-              </div>
-            ))}
-          </div>
-          {chatDegraded && (
-            <p className="mb-2 text-xs text-amber-700">
-              目前為短期記憶降級模式，長期偏好可能暫時未完整套用。
-            </p>
-          )}
-          {toolCallSummaries.length > 0 && (
-            <div className="mb-2 rounded border border-slate-200 bg-slate-50 p-2 text-xs">
-              <p className="mb-1 font-medium text-slate-700">本次工具使用</p>
-              <ul className="space-y-1">
-                {toolCallSummaries.map((item, index) => (
-                  <li key={`${item.tool ?? "tool"}-${index}`} className="rounded bg-white px-2 py-1">
-                    <span className="font-medium">{item.tool ?? "unknown"}</span>
-                    {" / "}
-                    <span className={item.ok ? "text-emerald-700" : "text-red-600"}>{item.ok ? "成功" : "失敗"}</span>
-                    {item.source ? ` / ${item.source}` : ""}
-                    {item.error ? ` / ${item.error}` : ""}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {chatError && <p className="mb-2 text-xs text-red-600">{chatError}</p>}
-          <form className="flex gap-2" onSubmit={onSubmitChat}>
-            <input
-              className="min-w-0 flex-1 rounded border px-2 py-1"
-              value={chatInput}
-              onChange={(event) => setChatInput(event.target.value)}
-              placeholder="輸入需求，例如想要親子與室內景點"
-              disabled={chatLoading}
-            />
-            <button
-              type="button"
-              className={`rounded border px-3 py-1 text-sm disabled:opacity-60 ${isRecording ? "border-red-600 text-red-600" : ""}`}
-              disabled={!speechSupported || chatLoading}
-              onMouseDown={startVoiceInput}
-              onMouseUp={stopVoiceInput}
-              onMouseLeave={stopVoiceInput}
-              onTouchStart={(event) => {
-                event.preventDefault();
-                startVoiceInput();
-              }}
-              onTouchEnd={(event) => {
-                event.preventDefault();
-                stopVoiceInput();
-              }}
-              aria-label="按住說話"
-              title={speechSupported ? "按住說話" : "目前瀏覽器不支援語音輸入"}
-            >
-              {isRecording ? "錄音中" : "按住說話"}
-            </button>
-            <button
-              className="rounded bg-slate-900 px-3 py-1 text-white disabled:opacity-60"
-              type="submit"
-              disabled={chatLoading}
-              aria-label="送出訊息"
-              title="送出訊息"
-            >
-              {chatLoading ? (
-                "回應中"
-              ) : (
-                <svg viewBox="0 0 20 20" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <path d="M3 10L17 3L13 17L10 11L3 10Z" />
-                </svg>
-              )}
-            </button>
-          </form>
-          <div className="mt-3 rounded border border-slate-200 p-2">
-            <p className="mb-2 text-sm font-medium">AI 推薦影片（最多 5 支）</p>
-            {recommendedVideos.length === 0 ? (
-              <p className="text-xs text-slate-500">送出對話後會顯示推薦影片。</p>
-            ) : (
-              <div className="flex snap-x snap-mandatory gap-2 overflow-x-auto pb-1">
-                {recommendedVideos.map((video) => (
-                  <div
-                    key={video.video_id ?? video.youtube_id}
-                    className="w-[280px] shrink-0 snap-start rounded border bg-white p-2 md:w-[320px]"
-                  >
-                    <button
-                      className="w-full text-left"
-                      onClick={() => {
-                        setPlayerVideo(video);
-                        setPlayerStartSec(video.segments?.[0]?.start_sec ?? 0);
-                        void trackRecommendationEvent("click", video);
-                      }}
-                      type="button"
-                    >
-                      <div className="mb-2 overflow-hidden rounded border bg-slate-100">
-                        <img src={video.thumbnail_url} alt={video.title} className="h-24 w-full object-cover" />
-                      </div>
-                      <p className="text-sm font-medium">{video.title}</p>
-                      {video.city && <span className="mr-1 inline-block rounded bg-blue-50 px-1 text-xs text-blue-700">{video.city}</span>}
-                      {video.source && <span className="inline-block rounded bg-slate-100 px-1 text-xs text-slate-500">{video.source}</span>}
-                      <p className="line-clamp-2 text-xs text-slate-600">{video.summary || "無摘要"}</p>
-                    </button>
-                    {video.recommendation_reasons && video.recommendation_reasons.length > 0 && (
-                      <div className="mt-1 rounded bg-emerald-50 px-2 py-1">
-                        <p className="text-xs font-medium text-emerald-800">為何推薦</p>
-                        <ul className="list-disc pl-4 text-xs text-emerald-700">
-                          {video.recommendation_reasons.map((reason, rIdx) => (
-                            <li key={rIdx}>{reason}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {video.segments && video.segments.length > 0 && (
-                      <div className="mt-1 max-h-24 overflow-y-auto">
-                        <div className="flex flex-wrap gap-1">
-                        {video.segments.map((seg) => {
-                          const startMin = Math.floor((seg.start_sec ?? 0) / 60);
-                          const startSec = (seg.start_sec ?? 0) % 60;
-                          const label = `${startMin}:${String(startSec).padStart(2, "0")}`;
-                          const ytUrl = `https://www.youtube.com/watch?v=${video.youtube_id}&t=${seg.start_sec ?? 0}`;
-                          return (
-                            <a
-                              key={seg.segment_id ?? seg.start_sec}
-                              href={ytUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-xs text-blue-700 hover:bg-blue-100"
-                              title={seg.summary || `片段 ${label}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void trackRecommendationEvent("segment_jump", video, seg.segment_id);
-                              }}
-                            >
-                              {label}
-                            </a>
-                          );
-                        })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+
+  const contentTabItems = [
+    { id: "chat" as const, label: "Chat", icon: <MessageCircle size={14} /> },
+    { id: "search" as const, label: "Search", icon: <Search size={14} /> },
+    { id: "saved" as const, label: "Saved", icon: <Heart size={14} /> },
+  ];
+  const [contentTab, setContentTab] = useState<"chat" | "search" | "saved">("chat");
+  const [tripPanelTab, setTripPanelTab] = useState("itinerary");
+  const [showTripPanel, setShowTripPanel] = useState(false);
+  const [searchAddMenuResultId, setSearchAddMenuResultId] = useState<string | null>(null);
 
   return (
     !authReady ? (
-      <main className="flex h-screen items-center justify-center">
-        <p className="text-sm text-slate-600">驗證登入狀態中...</p>
+      <main className="flex h-screen items-center justify-center bg-surface">
+        <p className="text-sm text-muted">Verifying authentication...</p>
       </main>
     ) : (
-    <main className="min-h-screen p-2 md:p-3">
-      <div className="mb-3 rounded-xl border border-slate-200 bg-white p-3">
-        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="text-lg font-semibold">AIYO 愛遊：一句話找到靈感，快速生成可行行程</h1>
-            <p className="text-sm text-slate-600">語音對話、影片片段推薦、地圖路線與行程編排整合在同一個畫面。</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" onClick={() => setLeftTab("ai")}>
-              按住說話
-            </Button>
-            <div className="flex items-end gap-1 rounded border px-2 py-1">
-              <span className="h-2 w-1 animate-pulse rounded bg-slate-500" />
-              <span className="h-3 w-1 animate-pulse rounded bg-slate-600 [animation-delay:120ms]" />
-              <span className="h-4 w-1 animate-pulse rounded bg-slate-700 [animation-delay:240ms]" />
-              <span className="h-3 w-1 animate-pulse rounded bg-slate-600 [animation-delay:360ms]" />
-              <span className="h-2 w-1 animate-pulse rounded bg-slate-500 [animation-delay:480ms]" />
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="grid min-h-[calc(100vh-7rem)] grid-cols-1 gap-3 xl:grid-cols-2">
-        <section className="flex min-h-0 flex-col rounded-xl border border-slate-200 bg-white">
-          <header className="flex flex-wrap items-center gap-2 border-b border-slate-200 p-3">
-            <span className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-700">{authEmail || "已登入"}</span>
-            <button
-              className="rounded border px-2 py-1 text-sm"
-              onClick={() => {
-                void (async () => {
-                  try {
-                    await apiFetchWithAuth(`${API_BASE_URL}/api/auth/logout`, { method: "POST" }, false);
-                  } catch {
-                    // Ignore logout API failures and clear client state anyway.
-                  } finally {
-                    if (typeof window !== "undefined") {
-                      window.localStorage.removeItem("aiyo_token");
-                    }
-                    router.replace("/login");
-                  }
-                })();
-              }}
-            >
-              登出
-            </button>
-            <button className="rounded border px-3 py-1 text-sm" onClick={() => window.history.back()}>
-              返回
-            </button>
-            <select className="rounded border px-2 py-1 text-sm" value={state.selectedDayId} onChange={(event) => selectDay(event.target.value)}>
-              {state.days.map((day) => (
-                <option key={day.id} value={day.id}>
-                  {day.label}
-                </option>
-              ))}
-            </select>
-            <span className="rounded bg-slate-100 px-2 py-1 text-sm text-slate-700">預算模式 C：全部啟用</span>
-            <button
-              className="rounded border px-3 py-1 text-sm disabled:opacity-40"
-              disabled={historyIndex === 0}
-              onClick={() => setHistoryIndex((idx) => Math.max(0, idx - 1))}
-              aria-label="Undo"
-              title="Undo"
-            >
-              <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 4L6 10L12 16" />
-              </svg>
-            </button>
-            <button
-              className="rounded border px-3 py-1 text-sm disabled:opacity-40"
-              disabled={historyIndex === history.length - 1}
-              onClick={() => setHistoryIndex((idx) => Math.min(history.length - 1, idx + 1))}
-              aria-label="Redo"
-              title="Redo"
-            >
-              <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M8 4L14 10L8 16" />
-              </svg>
-            </button>
-          </header>
+    <div className="flex h-screen overflow-hidden bg-surface">
+      {/* Left Sidebar */}
+      <AppSidebar
+        user={authEmail ? { name: authEmail.split("@")[0], username: authEmail.split("@")[0], avatar: undefined } : null}
+        chatCount={chatMessages.filter(m => m.role === "user").length || undefined}
+        savedCount={state.pendingPlaceIds.length || undefined}
+        onNewChat={() => {
+          const newId = createSessionId();
+          persistChatSessionId(newId);
+          setChatSessionId(newId);
+          setChatMessages(INITIAL_CHAT_MESSAGES);
+          setChatError(null);
+          const nextState = createInitialState();
+          setHistory([nextState]);
+          setHistoryIndex(0);
+        }}
+      />
 
-          <div className="min-h-0 flex flex-1 flex-col p-3">
-            <div className="mb-3 flex items-center gap-2">
-              <div className={`min-w-0 flex-1 ${enableDayHorizontalScroll ? "overflow-x-auto" : ""}`}>
-                <div className="flex w-max gap-2 pr-1">
-                  {state.days.map((day) => (
-                    <button
-                      key={day.id}
-                      className={`shrink-0 rounded border px-3 py-1 text-sm ${state.selectedDayId === day.id ? "bg-slate-900 text-white" : ""}`}
-                      onClick={() => selectDay(day.id)}
-                      draggable
-                      onDragStart={() => setDayDragIndex(state.days.findIndex((item) => item.id === day.id))}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDrop={() => {
-                        const toIndex = state.days.findIndex((item) => item.id === day.id);
-                        if (dayDragIndex !== null && toIndex >= 0) {
-                          reorderDays(dayDragIndex, toIndex);
-                        }
-                        setDayDragIndex(null);
-                      }}
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        setDayContextMenu({ dayId: day.id, x: event.clientX, y: event.clientY });
-                      }}
-                    >
-                      {day.id.toUpperCase()}
-                    </button>
-                  ))}
-                  <button className="shrink-0 rounded border px-3 py-1 text-sm" onClick={addDay} aria-label="新增 DAY" title="新增 DAY">
-                    <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M10 4v12M4 10h12" />
-                    </svg>
-                  </button>
-                </div>
+      {/* Main content area - Three column Mindtrip layout */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Center column: Chat / Search / Saved + Map */}
+        <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Top Bar */}
+          <TopBar
+            tripName={state.days[0]?.label ? `Trip ${state.days.length} days` : undefined}
+            destination={undefined}
+            dates={state.days[0]?.label}
+            travelers={undefined}
+            budget={state.totalBudget > 0 ? `$${state.totalBudget}` : undefined}
+            onInvite={() => void copyShareLink()}
+            onCreateTrip={() => void saveItineraryToServer()}
+            onEditDestination={() => {}}
+            onEditDates={openDateEditModal}
+            onEditTravelers={() => {}}
+            onEditBudget={() => {}}
+          />
+
+          {/* Content area with tabs */}
+          <div className="flex flex-1 overflow-hidden">
+            {/* Center panel: Chat + Videos */}
+            <div className="flex w-1/2 flex-col border-r border-border overflow-hidden">
+              <div className="border-b border-border px-4 pt-3">
+                <Tabs
+                  items={contentTabItems}
+                  activeId={contentTab}
+                  onChange={(id) => setContentTab(id as "chat" | "search" | "saved")}
+                />
               </div>
 
-              <div className="ml-auto flex shrink-0 gap-2">
-                <button className="rounded border px-3 py-1 text-sm" onClick={() => void saveItineraryToServer()}>
-                  儲存行程
-                </button>
-                <select
-                  className="rounded border px-2 py-1 text-sm"
-                  value={selectedItineraryId ?? ""}
-                  onChange={(event) => setSelectedItineraryId(Number(event.target.value) || null)}
-                >
-                  <option value="">選擇已儲存行程</option>
-                  {savedItineraries.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      #{item.id} {item.title || "未命名行程"}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-60"
-                  onClick={() => selectedItineraryId && void loadSavedItinerary(selectedItineraryId)}
-                  disabled={!selectedItineraryId || loadingSavedItinerary}
-                >
-                  {loadingSavedItinerary ? "載入中" : "載入行程"}
-                </button>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-60"
-                  onClick={() => void reoptimizeItinerary()}
-                  disabled={optimizingItinerary}
-                >
-                  {optimizingItinerary ? "優化中" : "重新優化"}
-                </button>
-                <button
-                  className="rounded border px-3 py-1 text-sm disabled:opacity-60"
-                  onClick={applyOptimizationResult}
-                  disabled={!optimizationResult}
-                >
-                  套用優化排序
-                </button>
-                <button className="rounded border px-3 py-1 text-sm" onClick={exportItineraryAsPdf}>
-                  匯出 PDF
-                </button>
-                <button className="rounded border px-3 py-1 text-sm" onClick={exportItineraryAsImage}>
-                  匯出圖片
-                </button>
-                <button className="rounded border px-3 py-1 text-sm" onClick={() => void copyShareLink()}>
-                  分享連結
-                </button>
-                <button className="rounded border px-3 py-1 text-sm" onClick={() => setIsPendingModalOpen(true)}>
-                  待安排清單
-                </button>
-                <button
-                  className={`rounded border px-3 py-1 text-sm ${leftTab === "itinerary" ? "bg-slate-900 text-white" : ""}`}
-                  onClick={() => setLeftTab("itinerary")}
-                >
-                  行程編輯
-                </button>
-                <button
-                  className={`rounded border px-3 py-1 text-sm ${leftTab === "ai" ? "bg-slate-900 text-white" : ""}`}
-                  onClick={() => setLeftTab("ai")}
-                >
-                  AI 對話
-                </button>
-              </div>
-            </div>
+              {contentTab === "chat" && (
+                <ChatPanel
+                  messages={chatMessages}
+                  chatInput={chatInput}
+                  onChatInputChange={(v) => setChatInput(v)}
+                  onSubmit={onSubmitChat}
+                  chatLoading={chatLoading}
+                  chatError={chatError}
+                  chatDegraded={chatDegraded}
+                  toolCallSummaries={toolCallSummaries}
+                  speechSupported={speechSupported}
+                  isRecording={isRecording}
+                  onStartRecording={startVoiceInput}
+                  onStopRecording={stopVoiceInput}
+                />
+              )}
 
-            {dayContextMenu && (
-              <div
-                className="fixed z-50 rounded border border-slate-300 bg-white p-1 shadow-lg"
-                style={{ left: dayContextMenu.x, top: dayContextMenu.y }}
-                onClick={(event) => event.stopPropagation()}
-              >
-                <button
-                  className="block w-full rounded px-3 py-1 text-left text-sm hover:bg-slate-100 disabled:opacity-40"
-                  disabled={state.days.length <= 1}
-                  onClick={() => deleteDay(dayContextMenu.dayId)}
-                >
-                  刪除
-                </button>
-              </div>
-            )}
-
-            {leftTab === "itinerary" && (
-              <div
-                className="min-h-0 flex-1 overflow-auto"
-                onTouchStart={onItineraryTouchStart}
-                onTouchEnd={onItineraryTouchEnd}
-              >
-                {optimizationResult && (
-                  <div className="mb-3 rounded-xl border border-slate-200 p-3 text-sm">
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      <h3 className="text-base font-semibold">行程可行性報告</h3>
-                      <span
-                        className={`rounded px-2 py-0.5 text-xs ${
-                          optimizationResult.feasible ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
-                        }`}
-                      >
-                        {optimizationResult.feasible ? "可行" : "需調整"}
-                      </span>
-                      <span className="text-xs text-slate-500">總費用：{Math.round(Number(optimizationResult.total_cost || 0))} 元</span>
+              {contentTab === "search" && (
+                <div className="flex flex-1 flex-col overflow-hidden p-4">
+                  <p className="mb-2 text-xs text-muted">輸入關鍵字搜尋景點，點結果可定位地圖；點「加入行程」可加入指定天數或待排入。</p>
+                  <form className="mb-4 flex items-center gap-2" onSubmit={onMapSearchSubmit}>
+                    <div className="flex flex-1 items-center rounded-2xl border border-border bg-surface-muted px-4">
+                      <Search size={16} className="text-muted mr-2" />
+                      <input
+                        id="map-search-input"
+                        name="map-search"
+                        ref={searchInputRef}
+                        className="min-w-0 flex-1 bg-transparent py-2.5 text-sm text-primary placeholder:text-muted outline-none"
+                        placeholder="Search places..."
+                        value={searchText}
+                        onChange={(event) => onMapSearchInputChange(event.target.value)}
+                        aria-label="搜尋地點"
+                      />
                     </div>
-                    {Array.isArray(optimizationResult.warnings) && optimizationResult.warnings.length > 0 && (
-                      <ul className="mb-2 list-disc space-y-1 pl-5 text-amber-700">
-                        {optimizationResult.warnings.map((warning, idx) => (
-                          <li key={`global-warning-${idx}`}>{warning}</li>
-                        ))}
-                      </ul>
-                    )}
-                    <div className="space-y-2">
-                      {optimizationResult.days.map((day) => (
-                        <div key={`report-day-${day.day_number}`} className="rounded border border-slate-200 bg-slate-50 p-2">
-                          <div className="mb-1 flex flex-wrap items-center gap-2">
-                            <strong>Day {day.day_number}</strong>
-                            <span>交通總時長：{Math.round(Number(day.total_travel_minutes || 0))} 分鐘</span>
-                            <span>預估花費：{Math.round(Number(day.total_cost || 0))} 元</span>
+                    <Button type="submit" size="sm">Search</Button>
+                  </form>
+
+                  {mapActionError && (
+                    <p className="mb-3 rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">{mapActionError}</p>
+                  )}
+
+                  <div className="flex-1 overflow-y-auto space-y-2">
+                    {mapSearchResults.map((result, index) => (
+                      <div
+                        key={result.id}
+                        className="flex items-center gap-3 rounded-xl p-3 transition-colors hover:bg-surface-muted"
+                      >
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                          onClick={() => focusSearchResult(result)}
+                        >
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-surface-muted text-sm font-semibold text-muted">
+                            {index + 1}
                           </div>
-                          {Array.isArray(day.warnings) && day.warnings.length > 0 && (
-                            <ul className="list-disc space-y-1 pl-5 text-amber-700">
-                              {day.warnings.map((warning, idx) => (
-                                <li key={`day-warning-${day.day_number}-${idx}`}>{warning}</li>
-                              ))}
-                            </ul>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium text-primary">{result.name}</p>
+                            <p className="text-xs text-muted truncate">{result.address}</p>
+                          </div>
+                          {result.rating && (
+                            <span className="text-xs text-muted shrink-0">{result.rating}</span>
+                          )}
+                        </button>
+                        <div className="relative shrink-0">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setSearchAddMenuResultId((id) => (id === result.id ? null : result.id))}
+                          >
+                            加入行程
+                          </Button>
+                          {searchAddMenuResultId === result.id && (
+                            <>
+                              <div
+                                className="fixed inset-0 z-10"
+                                aria-hidden
+                                onClick={() => setSearchAddMenuResultId(null)}
+                              />
+                              <div className="absolute right-0 top-full z-20 mt-1 min-w-[120px] rounded-lg border border-border bg-surface py-1 shadow-modal">
+                                {state.days.map((day, idx) => (
+                                  <button
+                                    key={day.id}
+                                    type="button"
+                                    className="w-full px-3 py-2 text-left text-sm text-primary hover:bg-surface-muted"
+                                    onClick={() => {
+                                      addSearchResultToDayOrPending(result, day.id);
+                                      setSearchAddMenuResultId(null);
+                                    }}
+                                  >
+                                    Day {idx + 1}
+                                  </button>
+                                ))}
+                                <button
+                                  type="button"
+                                  className="w-full px-3 py-2 text-left text-sm text-muted hover:bg-surface-muted"
+                                  onClick={() => {
+                                    addSearchResultToDayOrPending(result, "pending");
+                                    setSearchAddMenuResultId(null);
+                                  }}
+                                >
+                                  待排入
+                                </button>
+                              </div>
+                            </>
                           )}
                         </div>
+                      </div>
+                    ))}
+                    {mapSearchResults.length === 0 && !mapActionError && (
+                      <p className="py-8 text-center text-sm text-muted">
+                        Search for places to add to your trip
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {contentTab === "saved" && (
+                <div className="flex flex-1 flex-col overflow-hidden p-4">
+                  <div className="mb-4 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-primary">Saved Itineraries</h3>
+                    <Button size="sm" variant="outline" onClick={() => void saveItineraryToServer()}>
+                      Save current
+                    </Button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto space-y-2">
+                    {savedItineraries.map((item) => (
+                      <button
+                        key={item.id}
+                        className="flex w-full items-center gap-3 rounded-xl border border-border p-3 text-left hover:bg-surface-muted transition-colors"
+                        onClick={() => {
+                          setSelectedItineraryId(item.id);
+                          void loadSavedItinerary(item.id);
+                        }}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-primary">{item.title || "Untitled trip"}</p>
+                          <p className="text-xs text-muted">
+                            {item.days_count || 0} days {item.status && `/ ${item.status}`}
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                    {savedItineraries.length === 0 && (
+                      <p className="py-8 text-center text-sm text-muted">
+                        No saved trips yet
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Right panel: Map + Trip Panel toggle */}
+            <div className="flex w-1/2 flex-col overflow-hidden">
+              {/* Map section */}
+              <div className="relative flex-1">
+                <div ref={mapContainerRef} className="h-full w-full" />
+                {mapError && (
+                  <div className="absolute left-3 top-3 rounded-lg border border-danger/20 bg-surface px-3 py-2 text-xs text-danger shadow-card">
+                    {mapError}
+                  </div>
+                )}
+                {!mapError && !mapReady && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-surface/80 text-sm text-muted">
+                    Loading map...
+                  </div>
+                )}
+
+                {/* Place detail overlay */}
+                {selectedPlace && (
+                  <div
+                    className="absolute right-3 top-3 w-[360px] max-w-[92%] rounded-2xl border border-border bg-surface p-4 text-sm shadow-modal animate-slide-up"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <h3 className="text-base font-semibold text-primary">{selectedPlace.name}</h3>
+                    <p className="mt-1 text-muted">{selectedPlace.intro}</p>
+
+                    <div className="mt-3 space-y-1.5">
+                      <div className="flex items-start gap-2 text-xs">
+                        <span className="w-16 shrink-0 text-muted">Address</span>
+                        <span className="text-primary">{selectedPlace.address}</span>
+                      </div>
+                      <div className="flex items-start gap-2 text-xs">
+                        <span className="w-16 shrink-0 text-muted">Phone</span>
+                        <span className="text-primary">{selectedPlace.phone}</span>
+                      </div>
+                      <div className="flex items-start gap-2 text-xs">
+                        <span className="w-16 shrink-0 text-muted">Rating</span>
+                        <span className="text-primary">{selectedPlace.rating}</span>
+                      </div>
+                      <div className="flex items-start gap-2 text-xs">
+                        <span className="w-16 shrink-0 text-muted">Hours</span>
+                        <span className="text-primary">{selectedPlace.hours}</span>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {selectedPlace.reasons.map((reason) => (
+                        <span key={reason} className="rounded-btn bg-surface-muted px-2.5 py-1 text-xs text-primary">
+                          {reason}
+                        </span>
                       ))}
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <a
+                        href={selectedPlace.website}
+                        className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Website
+                      </a>
+                      <button
+                        className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
+                        type="button"
+                        onClick={() => openStreetViewAt(selectedPlace.lat, selectedPlace.lng)}
+                      >
+                        Street View
+                      </button>
+                    </div>
+
+                    <div className="mt-3 border-t border-border pt-3">
+                      <p className="mb-2 text-xs font-medium text-primary">Add to trip</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {state.days.map((day, idx) => (
+                          <button
+                            key={day.id}
+                            className="rounded-btn bg-surface-muted px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-colors"
+                            onClick={() => addToDayOrPending(selectedPlace.id, day.id)}
+                          >
+                            Day {idx + 1}
+                          </button>
+                        ))}
+                        <button
+                          className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
+                          onClick={() => addToDayOrPending(selectedPlace.id, "pending")}
+                        >
+                          Queue
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
 
-                <div className="mb-3 rounded-xl border border-slate-200 p-3">
-                  <h2 className="mb-2 text-base font-semibold">每日行程：{selectedDay.label}</h2>
+                {/* Trip panel toggle */}
+                <button
+                  onClick={() => setShowTripPanel(!showTripPanel)}
+                  className="absolute right-3 bottom-3 z-10 rounded-btn bg-primary px-4 py-2 text-xs font-medium text-primary-foreground shadow-card hover:bg-primary/90 transition-colors"
+                >
+                  {showTripPanel ? "Hide itinerary" : "Show itinerary"}
+                </button>
+              </div>
 
-                  <div className="space-y-2">
-                    {selectedDayPlaces.map((place, index) => (
-                      <div key={`${place.id}-${index}`} className="rounded border border-slate-200 p-2">
-                        <div
-                          draggable
-                          onDragStart={() => setDragIndex(index)}
-                          onDrop={() => {
-                            if (dragIndex !== null) {
-                              reorder(dragIndex, index);
-                            }
-                            setDragIndex(null);
-                          }}
-                          onDragOver={(event) => event.preventDefault()}
-                          className="group flex items-center gap-2"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="font-medium">{place.name}</div>
-                            <div className="text-sm text-slate-600">預計停留 {place.stayMinutes} 分鐘</div>
-                          </div>
-                          <span className="invisible text-sm text-slate-500 group-hover:visible">拖拉排序</span>
-                          <button
-                            className="rounded border px-2 py-1 text-xs"
-                            onClick={() =>
-                              commit((draft) => {
-                                draft.days = draft.days.map((day) =>
-                                  day.id === draft.selectedDayId ? { ...day, placeIds: [...day.placeIds, place.id] } : day
-                                );
-                              })
-                            }
-                            aria-label="複製景點"
-                            title="複製景點"
-                          >
-                            <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-                              <rect x="7" y="6" width="9" height="11" rx="1.8" />
-                              <rect x="4" y="3" width="9" height="11" rx="1.8" />
-                            </svg>
-                          </button>
-                          <button
-                            className="rounded border px-2 py-1 text-xs"
-                            onClick={() => removeFromSelectedDay(place.id, index)}
-                            aria-label="刪除景點"
-                            title="刪除景點"
-                          >
-                            <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-                              <path d="M4 6h12" />
-                              <path d="M7 6V4h6v2" />
-                              <path d="M6.5 6l.7 10h5.6l.7-10" />
-                              <path d="M8.5 9.5v4.5M11.5 9.5v4.5" />
-                            </svg>
-                          </button>
-                          <button
-                            className="rounded border px-2 py-1 text-xs"
-                            onClick={() => toggleMoveMenu(place.id, index)}
-                            aria-label="設定移動"
-                            title="設定移動"
-                          >
-                            <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-                              <circle cx="10" cy="10" r="3" />
-                              <path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M15.3 4.7l-1.6 1.6M6.3 13.7l-1.6 1.6" />
-                            </svg>
-                          </button>
-                          {openMoveMenuKey === `${place.id}-${index}` && (
-                            <select
-                              className="rounded border px-1 py-1 text-xs"
-                              defaultValue=""
-                              onChange={(event) => {
-                                const targetDayId = event.target.value;
-                                if (!targetDayId) {
-                                  return;
-                                }
-                                moveSinglePlaceTo(place.id, index, targetDayId);
-                                setOpenMoveMenuKey(null);
-                              }}
-                            >
-                              <option value="">選擇移動日</option>
-                              {state.days
-                                .filter((day) => day.id !== selectedDay.id)
-                                .map((day) => (
-                                  <option key={day.id} value={day.id}>
-                                    {day.label}
-                                  </option>
-                                ))}
-                            </select>
-                          )}
-                        </div>
+              {/* Collapsible Trip Panel */}
+              {showTripPanel && (
+                <div className="h-1/2 border-t border-border overflow-hidden">
+                  <TripPanel
+                    tripName={`Trip ${state.days.length} days`}
+                    dates={state.days[0]?.label}
+                    days={state.days}
+                    selectedDayId={state.selectedDayId}
+                    dayTimeline={selectedDayTimeline}
+                    places={places}
+                    activeTab={tripPanelTab}
+                    onTabChange={setTripPanelTab}
+                    onSelectDay={selectDay}
+                    onUndo={() => setHistoryIndex((idx) => Math.max(0, idx - 1))}
+                    onRedo={() => setHistoryIndex((idx) => Math.min(history.length - 1, idx + 1))}
+                    canUndo={historyIndex > 0}
+                    canRedo={historyIndex < history.length - 1}
+                    onPlaceDetails={(placeId) => setSelectedPlaceId(placeId)}
+                    onPlaceRemove={(placeId, index) => removeFromSelectedDay(placeId, index)}
+                    onPlaceDragStart={(index) => setDragIndex(index)}
+                    onPlaceDrop={(index) => {
+                      if (dragIndex !== null) { reorder(dragIndex, index); }
+                      setDragIndex(null);
+                    }}
+                    onAddDay={addDay}
+                    onEditDayLabel={openDateEditModalForDay}
+                    onAddPlace={() => setContentTab("search")}
+                    onSave={() => void saveItineraryToServer()}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
 
-                        {index < selectedDayPlaces.length - 1 && (
-                          <div className="mt-2 rounded bg-slate-50 p-2 text-sm">
-                            {(() => {
-                              const nextPlace = selectedDayPlaces[index + 1];
-                              const pairKey = `${selectedDay.id}:${index}-${index + 1}`;
-                              const mode = state.transportModes[pairKey] ?? "drive";
-                              const estimate = estimateTransport(mode, mapDistanceKm(place, nextPlace));
-                              const mapUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(
-                                place.name
-                              )}&destination=${encodeURIComponent(nextPlace.name)}&travelmode=${
-                                mode === "drive" ? "driving" : mode === "transit" ? "transit" : mode === "walk" ? "walking" : "bicycling"
-                              }`;
-                              return (
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span>交通方式</span>
-                                  <select
-                                    className="rounded border px-1 py-1"
-                                    value={mode}
-                                    onChange={(event) =>
-                                      commit((draft) => void (draft.transportModes[pairKey] = event.target.value as TransportMode))
-                                    }
-                                  >
-                                    <option value="drive">開車</option>
-                                    <option value="transit">大眾運輸</option>
-                                    <option value="walk">步行</option>
-                                    <option value="bike">騎車</option>
-                                  </select>
-                                  <span>預計時間 {estimate.minutes} 分鐘</span>
-                                  <span>距離 {estimate.distance}</span>
-                                  <a className="rounded border px-2 py-1" href={mapUrl} target="_blank" rel="noreferrer">
-                                    查看路線
-                                  </a>
-                                </div>
-                              );
-                            })()}
-                          </div>
-                        )}
-                      </div>
+      {/* Date edit modal */}
+      <Modal open={isDateEditModalOpen} onClose={() => { setIsDateEditModalOpen(false); setDateEditDayId(null); }}>
+        <ModalHeader>
+          <h3 className="text-lg font-bold text-primary">
+            {dateEditDayId ? "修改該天日期" : "修改行程日期"}
+          </h3>
+        </ModalHeader>
+        <ModalBody>
+          <p className="text-sm text-muted">
+            {dateEditDayId
+              ? "選擇此天的日期。"
+              : "設定行程開始日期，後續天數會依序遞增。"}
+          </p>
+          <div className="flex items-center gap-3">
+            <label htmlFor="trip-start-date" className="text-sm font-medium text-primary shrink-0">開始日期</label>
+            <input
+              id="trip-start-date"
+              name="trip-start-date"
+              type="date"
+              value={dateEditValue}
+              onChange={(e) => setDateEditValue(e.target.value)}
+              className="flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-primary"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="outline" onClick={() => setIsDateEditModalOpen(false)}>
+              取消
+            </Button>
+            <Button type="button" onClick={confirmDateEdit}>
+              確定
+            </Button>
+          </div>
+        </ModalBody>
+      </Modal>
+
+      {/* Pending places modal */}
+      <Modal open={isPendingModalOpen} onClose={() => setIsPendingModalOpen(false)} maxWidth="max-w-2xl">
+        <ModalHeader>
+          <h3 className="text-lg font-bold text-primary">Queued places</h3>
+        </ModalHeader>
+        <ModalBody>
+          {pendingPlaces.length === 0 ? (
+            <p className="py-4 text-center text-sm text-muted">No queued places.</p>
+          ) : (
+            <div className="space-y-3">
+              {pendingPlaces.map((place) => (
+                <div key={place.id} className="rounded-xl border border-border p-3">
+                  <p className="mb-2 font-medium text-sm text-primary">{place.name}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {state.days.map((day, idx) => (
+                      <button
+                        key={day.id}
+                        className="rounded-btn bg-surface-muted px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-colors"
+                        onClick={() => addToDayOrPending(place.id, day.id)}
+                      >
+                        Day {idx + 1}
+                      </button>
                     ))}
                   </div>
                 </div>
-
-                <div className="mb-3 rounded-xl border border-slate-200 p-3 text-sm">
-                  <h3 className="mb-2 text-base font-semibold">行程時間軸</h3>
-                  {selectedDayTimeline.length === 0 ? (
-                    <p className="text-slate-500">目前沒有景點可顯示時間軸。</p>
-                  ) : (
-                    <ul className="space-y-2">
-                      {selectedDayTimeline.map((item, idx) => (
-                        <li key={`${item.placeId}-${idx}`} className="rounded border border-slate-200 bg-slate-50 px-3 py-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <strong>{item.placeName}</strong>
-                            <span className="text-xs text-slate-600">
-                              {item.arrivalText} - {item.departText}
-                            </span>
-                            <span className="text-xs text-slate-500">停留 {item.stayMinutes} 分鐘</span>
-                          </div>
-                          {idx > 0 && (
-                            <p className="mt-1 text-xs text-slate-600">
-                              前段交通：{item.travelMinutesFromPrev} 分鐘（{item.travelModeFromPrev === "drive"
-                                ? "開車"
-                                : item.travelModeFromPrev === "transit"
-                                  ? "大眾運輸"
-                                  : item.travelModeFromPrev === "walk"
-                                    ? "步行"
-                                    : "騎車"}
-                              ）
-                            </p>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-
-                <div className="rounded-xl border border-slate-200 p-3 text-sm">
-                  <h3 className="mb-2 text-base font-semibold">預算資訊</h3>
-                  {(state.budgetMode === "A" || state.budgetMode === "C") && (
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      <label>
-                        總預算
-                        <input
-                          className="ml-1 w-24 rounded border px-2 py-1"
-                          type="number"
-                          value={state.totalBudget}
-                          onChange={(event) => commit((draft) => void (draft.totalBudget = Number(event.target.value) || 0))}
-                        />
-                      </label>
-                      <label>
-                        已花費
-                        <input
-                          className="ml-1 w-24 rounded border px-2 py-1"
-                          type="number"
-                          value={state.spentBudget}
-                          onChange={(event) => commit((draft) => void (draft.spentBudget = Number(event.target.value) || 0))}
-                        />
-                      </label>
-                      <span>剩餘：{Math.max(state.totalBudget - state.spentBudget, 0)} 元</span>
-                    </div>
-                  )}
-                  {(state.budgetMode === "B" || state.budgetMode === "C") && (
-                    <div>
-                      <p className="mb-1">本日景點預估花費：{estimatedDayCost} 元</p>
-                      <ul className="space-y-1">
-                        {selectedDayPlaces.map((place, index) => (
-                          <li key={`${place.id}-${index}`} className="rounded bg-slate-50 px-2 py-1">
-                            {place.name}：{place.estimatedCost} 元
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {leftTab === "ai" && <div className="min-h-0 flex-1">{chatPanel}</div>}
-          </div>
-        </section>
-
-        <section className="relative flex min-h-[420px] flex-col rounded-xl border border-slate-200 bg-white p-3 xl:min-h-0">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={onMapSearchSubmit}>
-              <div className="flex min-w-0 flex-1 items-center rounded border bg-white px-2">
-                <span className="pr-2 text-slate-500">搜尋</span>
-                <input
-                  ref={searchInputRef}
-                  className="min-w-0 flex-1 border-0 px-0 py-1 outline-none"
-                  placeholder="輸入地點名稱或地址"
-                  value={searchText}
-                  onChange={(event) => onMapSearchInputChange(event.target.value)}
-                />
-              </div>
-              <button className="rounded border px-3 py-1 text-sm" type="submit">
-                定位
-              </button>
-              <select
-                className="rounded border px-2 py-1 text-sm"
-                value={mapSearchMode}
-                onChange={(event) => setMapSearchMode(event.target.value as "center" | "global")}
-                title="搜尋範圍模式"
-              >
-                <option value="center">以地圖中心為主</option>
-                <option value="global">全域搜尋</option>
-              </select>
-              <label className="flex items-center gap-1 text-sm">
-                半徑(km)
-                <input
-                  className="w-16 rounded border px-1 py-1"
-                  type="number"
-                  min={1}
-                  max={50}
-                  value={mapSearchRadiusKm}
-                  onChange={(event) => setMapSearchRadiusKm(Math.max(1, Math.min(50, Number(event.target.value) || 25)))}
-                  disabled={mapSearchMode !== "center"}
-                />
-              </label>
-              <button
-                className="rounded border px-3 py-1 text-sm disabled:opacity-60"
-                type="button"
-                onClick={locateCurrentPosition}
-                disabled={locatingCurrentPosition}
-              >
-                {locatingCurrentPosition ? "定位中" : "用目前位置"}
-              </button>
-              {mapSearchResults.length > 0 && (
-                <button className="rounded border px-3 py-1 text-sm" type="button" onClick={clearMapSearch}>
-                  清除結果
-                </button>
-              )}
-              <button className="rounded border px-3 py-1 text-sm" type="button" onClick={openStreetViewAtMapCenter}>
-                開啟街景
-              </button>
-            </form>
-          </div>
-          {mapActionError && <p className="mb-2 text-xs text-red-600">{mapActionError}</p>}
-          {mapSearchResults.length > 0 && (
-            <div className="mb-2 max-h-36 overflow-auto rounded border border-slate-200 bg-slate-50 p-2">
-              <ul className="space-y-1 text-xs">
-                {mapSearchResults.map((result, index) => (
-                  <li key={result.id}>
-                    <button
-                      type="button"
-                      className="w-full rounded border border-slate-200 bg-white px-2 py-1 text-left hover:bg-slate-100"
-                      onClick={() => focusSearchResult(result)}
-                    >
-                      <p className="font-medium">
-                        {index + 1}. {result.name}
-                      </p>
-                      <p className="text-slate-500">{result.address}</p>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              ))}
             </div>
           )}
+        </ModalBody>
+      </Modal>
 
-          <div className="relative min-h-[280px] flex-1 overflow-hidden rounded-lg border">
-            <div ref={mapContainerRef} className="h-full w-full" />
-            {mapError && (
-              <div className="absolute left-3 top-3 rounded border border-red-200 bg-white px-3 py-2 text-xs text-red-600">
-                {mapError}
-              </div>
-            )}
-            {!mapError && !mapReady && (
-              <div className="absolute inset-0 flex items-center justify-center bg-white/80 text-sm text-slate-600">
-                地圖載入中...
-              </div>
-            )}
-
-            {selectedPlace && (
-              <div
-                className="absolute right-3 top-3 w-[360px] max-w-[92%] rounded-xl border border-slate-300 bg-white p-3 text-sm shadow"
-                onClick={(event) => event.stopPropagation()}
-              >
-              <h3 className="text-base font-semibold">{selectedPlace.name}</h3>
-              <p className="mt-1 text-slate-600">{selectedPlace.intro}</p>
-
-              <div className="mt-2 grid grid-cols-[88px_1fr] gap-y-1">
-                <span className="text-slate-500">地址</span>
-                <span>{selectedPlace.address}</span>
-                <span className="text-slate-500">電話</span>
-                <span>{selectedPlace.phone}</span>
-                <span className="text-slate-500">網站</span>
-                <a href={selectedPlace.website} className="underline" target="_blank" rel="noreferrer">
-                  官方連結
-                </a>
-                <span className="text-slate-500">評分</span>
-                <span>{selectedPlace.rating}</span>
-                <span className="text-slate-500">營業時間</span>
-                <span>{selectedPlace.hours}</span>
-              </div>
-
-              <div className="mt-2 flex flex-wrap gap-2">
-                {selectedPlace.reasons.map((reason) => (
-                  <span key={reason} className="rounded-full bg-slate-100 px-2 py-1 text-xs">
-                    {reason}
-                  </span>
-                ))}
-              </div>
-
-              <ul className="mt-2 list-disc pl-5">
-                {selectedPlace.notes.map((note) => (
-                  <li key={note}>{note}</li>
-                ))}
-              </ul>
-
-              <div className="mt-2 flex flex-wrap gap-2">
-                <a
-                  href={`https://www.google.com/search?q=${encodeURIComponent(selectedPlace.name)}`}
-                  className="rounded border px-2 py-1"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  用 Google 搜尋
-                </a>
-                <a
-                  href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(selectedPlace.name)}`}
-                  className="rounded border px-2 py-1"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  用 Google Maps 打開
-                </a>
-                <button className="rounded border px-2 py-1" type="button" onClick={() => openStreetViewAt(selectedPlace.lat, selectedPlace.lng)}>
-                  看街景
-                </button>
-              </div>
-
-              <div className="mt-3 rounded border border-slate-200 p-2">
-                <div className="mb-2 font-medium">新增到行程</div>
-                <div className="flex flex-wrap gap-2">
-                  {state.days.map((day) => (
-                    <button key={day.id} className="rounded border px-2 py-1" onClick={() => addToDayOrPending(selectedPlace.id, day.id)}>
-                      {day.id.toUpperCase()}
-                    </button>
-                  ))}
-                  <button className="rounded border px-2 py-1" onClick={() => addToDayOrPending(selectedPlace.id, "pending")}>
-                    加到待安排
-                  </button>
-                </div>
-              </div>
-
-              <div className="mt-3 rounded border border-slate-200 p-2">
-                <div className="mb-2 font-medium">評論（Google）</div>
-                <ul className="list-disc pl-5">
-                  {selectedPlace.googleComments.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-              </div>
-            )}
-          </div>
-        </section>
-      </div>
-
-      {isPendingModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onClick={() => setIsPendingModalOpen(false)}
-        >
-          <div className="w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-4 shadow-xl" onClick={(event) => event.stopPropagation()}>
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-semibold">待安排景點清單</h3>
-              <button className="rounded border px-3 py-1 text-sm" onClick={() => setIsPendingModalOpen(false)}>
-                關閉
-              </button>
-            </div>
-            {pendingPlaces.length === 0 ? (
-              <p className="text-sm text-slate-600">目前沒有待安排景點。</p>
-            ) : (
-              <ul className="space-y-2 text-sm">
-                {pendingPlaces.map((place) => (
-                  <li key={place.id} className="rounded border border-slate-200 p-2">
-                    <div className="mb-2 font-medium">{place.name}</div>
-                    <div className="flex flex-wrap gap-2">
-                      {state.days.map((day) => (
-                        <button
-                          key={day.id}
-                          className="rounded border px-2 py-1 text-xs"
-                          onClick={() => addToDayOrPending(place.id, day.id)}
-                        >
-                          加到 {day.id.toUpperCase()}
-                        </button>
-                      ))}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </div>
-      )}
-
+      {/* Video player modal */}
       {playerVideo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setPlayerVideo(null)}>
-          <div className="w-full max-w-3xl rounded-xl border border-slate-200 bg-white p-4" onClick={(event) => event.stopPropagation()}>
-            <div className="mb-2 flex items-center justify-between">
-              <p className="font-semibold">{playerVideo.title}</p>
-              <button className="rounded border px-2 py-1 text-sm" onClick={() => setPlayerVideo(null)}>
-                關閉
-              </button>
-            </div>
-            <div className="mb-3 aspect-video overflow-hidden rounded border">
-              <iframe
-                title={`player-${playerVideo.video_id}`}
-                className="h-full w-full"
-                src={`https://www.youtube.com/embed/${playerVideo.youtube_id}?start=${playerStartSec}&autoplay=1`}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
-            </div>
-            <p className="mb-2 text-sm font-medium">影片片段時間戳記</p>
-            <div className="max-h-48 overflow-auto rounded border bg-slate-50 p-2">
-              {playerVideo.segments?.length ? (
-                <ul className="space-y-2">
-                  {playerVideo.segments.map((segment) => (
-                    <li key={segment.segment_id} className="rounded border bg-white p-2 text-sm">
-                      <button className="rounded border px-2 py-1 text-xs" onClick={() => setPlayerStartSec(segment.start_sec)} type="button">
-                        跳轉 {formatSeconds(segment.start_sec)} - {formatSeconds(segment.end_sec)}
-                      </button>
-                      <p className="mt-1 text-xs text-slate-600">{segment.summary || "無摘要"}</p>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-xs text-slate-500">此影片目前沒有片段資料。</p>
-              )}
-            </div>
-          </div>
-        </div>
+        <VideoPlayerModal
+          video={playerVideo}
+          startSec={playerStartSec}
+          onClose={() => setPlayerVideo(null)}
+          onJumpToTime={(sec) => setPlayerStartSec(sec)}
+        />
       )}
 
-    </main>
+    </div>
     )
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense fallback={
+      <div className="flex h-screen items-center justify-center bg-surface">
+        <p className="text-sm text-muted">Loading...</p>
+      </div>
+    }>
+      <HomePageInner />
+    </Suspense>
   );
 }

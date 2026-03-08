@@ -242,9 +242,9 @@ function ProfileSection({ userId }: { userId: number }) {
   if (!data) return <p className="text-sm text-gray-400">Loading...</p>;
   return (
     <div className="space-y-4">
-      <Section title="User">{data.user && <JsonBlock data={data.user} />}</Section>
-      <Section title="Profile">{data.profile ? <JsonBlock data={data.profile} /> : <Empty />}</Section>
-      <Section title="AI Settings">{data.ai_settings ? <JsonBlock data={data.ai_settings} /> : <Empty />}</Section>
+      <Section title="User">{data.user ? <JsonBlock data={data.user as Record<string, unknown>} /> : <Empty />}</Section>
+      <Section title="Profile">{data.profile ? <JsonBlock data={data.profile as Record<string, unknown>} /> : <Empty />}</Section>
+      <Section title="AI Settings">{data.ai_settings ? <JsonBlock data={data.ai_settings as Record<string, unknown>} /> : <Empty />}</Section>
     </div>
   );
 }
@@ -328,11 +328,11 @@ function ChatSection({ userId }: { userId: number }) {
               <span className="mr-2 text-xs font-bold text-gray-500">{role}</span>
               <span className="block text-[10px] text-gray-400">{formatDate(String((m as Record<string, unknown>).created_at || ""))}</span>
               <p className="mt-1 whitespace-pre-wrap">{content}</p>
-              {(m as Record<string, unknown>).metadata && (
+              {(m as Record<string, unknown>).metadata ? (
                 <div className="mt-2">
-                  <JsonBlock data={(m as Record<string, unknown>).metadata} />
+                  <JsonBlock data={(m as Record<string, unknown>).metadata as Record<string, unknown>} />
                 </div>
-              )}
+              ) : null}
             </div>
           );
         })}
