@@ -78,7 +78,7 @@ AIYO 愛遊是一個互動式旅遊網站，提供以下核心功能：
    |
    |  HTTP / gRPC
    v
-[ AI Service ] Python + FastAPI + vLLM (Qwen3-8B)
+[ AI Service ] Python + FastAPI + Ollama（gemma4:26b / gemma4:e4b）
    |
    |  DB / Cache / External APIs
    v
@@ -91,7 +91,7 @@ AIYO 愛遊是一個互動式旅遊網站，提供以下核心功能：
 - **後端**：Node.js 18+, Python 3.10+
 - **資料庫**：PostgreSQL 14+ (with pgvector extension)
 - **快取**：Redis 6+
-- **AI 模型**：vLLM 或 Ollama（支援 Qwen3-8B / Llama3.3-8B）
+- **AI 模型（Ollama，本機）**：請在本機安裝 Ollama，並拉取本專案支援的 **Gemma 4** 模型兩種標籤：**`gemma4:26b`**（26B）、**`gemma4:e4b`**（e4B）。實際名稱須與 `ollama list` 顯示一致；環境變數 `OLLAMA_MODEL` 請設為其中一個（預設為 `gemma4:e4b`，見 `.env.example`）。
 
 ### 開發階段建議
 
@@ -152,9 +152,9 @@ docker build -t aiyo-frontend ./frontend
 - RAG (Retrieval-Augmented Generation) 技術整合
 - 結合 Google Maps API 進行路線優化與時間估算
 
-### 4. 本地 LLM 部署
-- 使用 vLLM 部署 Qwen3-8B / Llama3.3-8B
-- 降低 API 成本，提升資料隱私
+### 4. 本地 LLM 部署（Ollama）
+- 於**本機**透過 Ollama 使用 **Gemma 4**：支援 **`gemma4:26b`**（26B）與 **`gemma4:e4b`**（e4B）；請先執行 `ollama pull gemma4:26b`、`ollama pull gemma4:e4b` 完成安裝
+- 可降低雲端 API 成本並提升資料隱私（推論在本機執行）
 
 ---
 
