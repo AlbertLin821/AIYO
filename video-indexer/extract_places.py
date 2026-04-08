@@ -95,10 +95,38 @@ def _deduplicate_places(places: list[dict]) -> list[dict]:
     return result
 
 
-def summarize_segment_text(texts: list[str], max_chars: int = 150) -> str:
-    """將片段文本合併為簡短摘要，供儲存或顯示。"""
+def summarize_segment_text(texts: list[str], max_chars: int = 300, timeout: float = 45.0) -> str:
+    """將片段文本合併為簡短摘要（優先使用 Ollama 語意摘要），供儲存與嵌入檢索。"""
     full = " ".join(texts).strip()
     full = re.sub(r"\s+", " ", full)
-    if len(full) <= max_chars:
+    if len(full) < 50:
         return full
-    return full[: max_chars - 3] + "..."
+    base_url = get_ollama_base_url().rstrip("/")
+    model = get_ollama_model()
+    prompt = (
+        "請用繁體中文為以下旅遊影片片段撰寫精簡摘要（約 100 至 200 字），"
+        "保留地名、景點名稱、特色描述等關鍵資訊；不要加入前言或結語，直接輸出摘要本文。\n\n"
+        "片段文字：\n"
+        + full[:2000]
+    )
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(
+                f"{base_url}/api/generate",
+                json={"model": model, "prompt": prompt, "stream": False},
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        content = (data.get("response") or "").strip()
+    except Exception:
+        content = ""
+
+    if len(content) < 20:
+        if len(full) <= max_chars:
+            return full
+        return full[: max_chars - 3] + "..."
+
+    content = re.sub(r"\s+", " ", content).strip()
+    if len(content) > max_chars:
+        return content[: max_chars - 3] + "..."
+    return content

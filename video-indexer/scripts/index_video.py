@@ -15,6 +15,7 @@ from psycopg2.extras import RealDictCursor
 from config import get_database_url
 from transcripts import fetch_transcript, merge_adjacent_cues
 from whisper_transcribe import transcribe_video
+from ollama_embeddings import embed_text, get_vector_column_dim
 from semantic_segment import segment_by_semantic_similarity, Segment
 from extract_places import extract_places_with_ollama, summarize_segment_text
 
@@ -26,11 +27,11 @@ def get_videos_to_index(conn, limit: int = 10, youtube_ids: list[str] | None = N
             placeholders = ",".join(["%s"] * len(youtube_ids))
             cur.execute(
                 f"""
-                SELECT v.id, v.youtube_id, v.title, v.channel
+                SELECT v.id, v.youtube_id, v.title, v.channel, v.city
                 FROM videos v
                 LEFT JOIN segments s ON s.video_id = v.id
                 WHERE v.youtube_id IN ({placeholders})
-                GROUP BY v.id, v.youtube_id, v.title, v.channel
+                GROUP BY v.id, v.youtube_id, v.title, v.channel, v.city
                 HAVING COUNT(s.id) = 0
                 """,
                 youtube_ids,
@@ -38,10 +39,10 @@ def get_videos_to_index(conn, limit: int = 10, youtube_ids: list[str] | None = N
         else:
             cur.execute(
                 """
-                SELECT v.id, v.youtube_id, v.title, v.channel
+                SELECT v.id, v.youtube_id, v.title, v.channel, v.city
                 FROM videos v
                 LEFT JOIN segments s ON s.video_id = v.id
-                GROUP BY v.id, v.youtube_id, v.title, v.channel
+                GROUP BY v.id, v.youtube_id, v.title, v.channel, v.city
                 HAVING COUNT(s.id) = 0
                 ORDER BY v.id
                 LIMIT %s
@@ -95,6 +96,11 @@ def index_video(conn, video: dict, use_whisper: bool = True, skip_places: bool =
     video_id = video["id"]
     youtube_id = video["youtube_id"]
     title = video["title"]
+    video_city = video.get("city")
+    if isinstance(video_city, str):
+        video_city = video_city.strip() or None
+    else:
+        video_city = None
 
     cues = get_transcript(youtube_id, use_whisper=use_whisper, verbose=verbose)
     if not cues:
@@ -110,6 +116,7 @@ def index_video(conn, video: dict, use_whisper: bool = True, skip_places: bool =
 
     seg_count = 0
     total = len(segments)
+    expected_dim = get_vector_column_dim(conn, "segments", "embedding_vector")
     with conn.cursor() as cur:
         for i, seg in enumerate(segments):
             if verbose and not skip_places:
@@ -122,12 +129,21 @@ def index_video(conn, video: dict, use_whisper: bool = True, skip_places: bool =
 
             tags = [{"name": p["name"], "type": p["type"]} for p in places_data]
 
-            embedding_str = "[" + ",".join(str(x) for x in seg.embedding.tolist()) + "]"
+            retrieval_text = summary or combined_text
+            retrieval_embedding = embed_text(retrieval_text)
+            if not retrieval_embedding:
+                raise RuntimeError(f"無法為 segment 產生 Ollama embedding: video_id={video_id}, index={i}")
+            if expected_dim and len(retrieval_embedding) != expected_dim:
+                raise RuntimeError(
+                    f"segment embedding 維度不符: expected={expected_dim}, got={len(retrieval_embedding)}, "
+                    f"video_id={video_id}, index={i}"
+                )
+            embedding_str = "[" + ",".join(str(x) for x in retrieval_embedding) + "]"
 
             cur.execute(
                 """
-                INSERT INTO segments (video_id, start_sec, end_sec, summary, tags, embedding_vector)
-                VALUES (%s, %s, %s, %s, %s, %s::vector)
+                INSERT INTO segments (video_id, start_sec, end_sec, summary, tags, embedding_vector, city)
+                VALUES (%s, %s, %s, %s, %s, %s::vector, %s)
                 RETURNING id
                 """,
                 (
@@ -137,6 +153,7 @@ def index_video(conn, video: dict, use_whisper: bool = True, skip_places: bool =
                     summary,
                     pg_extras.Json(tags),
                     embedding_str,
+                    video_city,
                 ),
             )
             seg_id = cur.fetchone()[0]

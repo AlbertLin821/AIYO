@@ -29,3 +29,10 @@ npm run migrate:deploy
 - `001_`：初始 schema
 - 後續遷移依序為 `002_`, `003_` 等
 - 檔名建議：`NNN_描述.sql`
+- `013_backfill_segment_city.sql`：從 `videos.city` 回填 `segments.city`（可重複執行，僅更新空值）
+
+## 本機測試前置
+
+1. 啟動 Docker Desktop 後：`docker compose up -d postgres redis`
+2. 專案根目錄執行：`.\scripts\prepare-local-test.ps1`（含依賴安裝與遷移）
+3. 若僅重跑遷移：`.\scripts\run-migrate-only.ps1`

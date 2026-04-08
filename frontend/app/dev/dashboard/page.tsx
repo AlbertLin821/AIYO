@@ -57,21 +57,21 @@ function formatDate(d: string | undefined) {
 
 function JsonBlock({ data }: { data: unknown }) {
   const [expanded, setExpanded] = useState(false);
-  if (data === null || data === undefined) return <span className="text-gray-400">null</span>;
+  if (data === null || data === undefined) return <span className="text-muted">null</span>;
   const text = JSON.stringify(data, null, 2);
   if (text.length < 120) {
-    return <pre className="whitespace-pre-wrap break-all text-xs text-gray-700">{text}</pre>;
+    return <pre className="whitespace-pre-wrap break-all text-xs text-muted-foreground">{text}</pre>;
   }
   return (
     <div>
       <button
         onClick={() => setExpanded(!expanded)}
-        className="mb-1 text-xs text-indigo-600 underline"
+        className="mb-1 text-xs text-primary underline"
       >
         {expanded ? "collapse" : `expand (${text.length} chars)`}
       </button>
       {expanded && (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded bg-gray-50 p-2 text-xs text-gray-700">
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded bg-surface-muted p-2 text-xs text-muted-foreground">
           {text}
         </pre>
       )}
@@ -111,12 +111,12 @@ export default function DevDashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-800">
+    <div className="min-h-screen bg-surface-canvas text-primary">
       {/* header */}
-      <header className="flex items-center justify-between border-b bg-white px-6 py-3 shadow-sm">
-        <h1 className="text-lg font-bold text-indigo-700">AIYO Dev Console</h1>
+      <header className="flex items-center justify-between border-b border-border bg-surface px-6 py-3 shadow-card">
+        <h1 className="text-lg font-bold text-primary">AIYO Dev Console</h1>
         <div className="flex items-center gap-4 text-sm">
-          <span className="text-gray-500">{email}</span>
+          <span className="text-muted">{email}</span>
           <button onClick={handleLogout} className="text-red-600 hover:underline">
             Logout
           </button>
@@ -124,13 +124,13 @@ export default function DevDashboardPage() {
       </header>
 
       {/* tab bar */}
-      <nav className="flex gap-1 border-b bg-white px-6 pt-2">
+      <nav className="flex gap-1 border-b border-border bg-surface px-6 pt-2">
         {(["users", "audit"] as TabName[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={`rounded-t px-4 py-2 text-sm font-medium ${
-              tab === t ? "border-b-2 border-indigo-600 text-indigo-700" : "text-gray-500 hover:text-gray-700"
+              tab === t ? "border-b-2 border-primary text-primary" : "text-muted hover:text-muted-foreground"
             }`}
           >
             {t === "users" ? "Users" : "Audit Logs"}
@@ -165,29 +165,29 @@ function UsersTab() {
     <div className="flex gap-6">
       {/* user list */}
       <div className="w-64 shrink-0">
-        <h2 className="mb-3 text-sm font-semibold text-gray-600">User List</h2>
+        <h2 className="mb-3 text-sm font-semibold text-muted-foreground">User List</h2>
         <ul className="space-y-1">
           {users.map((u) => (
             <li key={u.id}>
               <button
                 onClick={() => setSelectedId(u.id)}
                 className={`w-full rounded px-3 py-2 text-left text-sm ${
-                  selectedId === u.id ? "bg-indigo-100 font-medium text-indigo-800" : "hover:bg-gray-100"
+                  selectedId === u.id ? "bg-primary/10 font-medium text-primary" : "hover:bg-surface-muted"
                 }`}
               >
-                <span className="mr-1 text-xs text-gray-400">#{u.id}</span>
+                <span className="mr-1 text-xs text-muted">#{u.id}</span>
                 {u.email}
               </button>
             </li>
           ))}
-          {users.length === 0 && <li className="px-3 py-2 text-xs text-gray-400">No users</li>}
+          {users.length === 0 && <li className="px-3 py-2 text-xs text-muted">No users</li>}
         </ul>
       </div>
 
       {/* user detail */}
       <div className="min-w-0 flex-1">
         {selectedId ? <UserDetail userId={selectedId} /> : (
-          <p className="pt-12 text-center text-sm text-gray-400">
+          <p className="pt-12 text-center text-sm text-muted">
             Select a user to view details
           </p>
         )}
@@ -213,7 +213,7 @@ function UserDetail({ userId }: { userId: number }) {
             key={s}
             onClick={() => setSection(s)}
             className={`rounded px-3 py-1 text-xs font-medium ${
-              section === s ? "bg-indigo-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+              section === s ? "bg-primary text-primary-foreground" : "bg-surface-muted text-primary hover:bg-surface-hover"
             }`}
           >
             {s === "profile" ? "Profile" : s === "memories" ? "Memories" : s === "chat" ? "Chat" : "Itineraries"}
@@ -239,7 +239,7 @@ function ProfileSection({ userId }: { userId: number }) {
       .then(setData)
       .catch(() => {});
   }, [userId]);
-  if (!data) return <p className="text-sm text-gray-400">Loading...</p>;
+  if (!data) return <p className="text-sm text-muted">Loading...</p>;
   return (
     <div className="space-y-4">
       <Section title="User">{data.user ? <JsonBlock data={data.user as Record<string, unknown>} /> : <Empty />}</Section>
@@ -261,7 +261,7 @@ function MemoriesSection({ userId }: { userId: number }) {
   return (
     <div className="space-y-2">
       {memories.map((m, i) => (
-        <div key={i} className="rounded border bg-white p-3">
+        <div key={i} className="rounded border border-border bg-surface p-3">
           <JsonBlock data={m} />
         </div>
       ))}
@@ -292,7 +292,7 @@ function ChatSection({ userId }: { userId: number }) {
   return (
     <div className="flex gap-4">
       <div className="w-52 shrink-0 space-y-1">
-        <p className="mb-2 text-xs font-semibold text-gray-500">Sessions</p>
+        <p className="mb-2 text-xs font-semibold text-muted">Sessions</p>
         {sessions.map((s) => {
           const sid = String((s as Record<string, unknown>).session_id || "");
           return (
@@ -300,11 +300,11 @@ function ChatSection({ userId }: { userId: number }) {
               key={sid}
               onClick={() => setSelectedSession(sid)}
               className={`block w-full truncate rounded px-2 py-1 text-left text-xs ${
-                selectedSession === sid ? "bg-indigo-100 text-indigo-800" : "hover:bg-gray-100"
+                selectedSession === sid ? "bg-primary/10 text-primary" : "hover:bg-surface-muted"
               }`}
             >
               {String((s as Record<string, unknown>).title || sid).slice(0, 40)}
-              <span className="block text-[10px] text-gray-400">
+              <span className="block text-[10px] text-muted">
                 {formatDate(String((s as Record<string, unknown>).updated_at || ""))}
               </span>
             </button>
@@ -314,19 +314,19 @@ function ChatSection({ userId }: { userId: number }) {
       </div>
 
       <div className="min-w-0 flex-1 space-y-2">
-        {messages.length === 0 && <p className="pt-4 text-xs text-gray-400">Select a session</p>}
+        {messages.length === 0 && <p className="pt-4 text-xs text-muted">Select a session</p>}
         {messages.map((m, i) => {
           const role = String((m as Record<string, unknown>).role || "user");
           const content = String((m as Record<string, unknown>).content || "");
           return (
             <div
               key={i}
-              className={`rounded border p-3 text-sm ${
-                role === "assistant" ? "border-indigo-200 bg-indigo-50" : "border-gray-200 bg-white"
+              className={`rounded border border-border p-3 text-sm ${
+                role === "assistant" ? "border-primary/20 bg-primary/5" : "bg-surface"
               }`}
             >
-              <span className="mr-2 text-xs font-bold text-gray-500">{role}</span>
-              <span className="block text-[10px] text-gray-400">{formatDate(String((m as Record<string, unknown>).created_at || ""))}</span>
+              <span className="mr-2 text-xs font-bold text-muted">{role}</span>
+              <span className="block text-[10px] text-muted">{formatDate(String((m as Record<string, unknown>).created_at || ""))}</span>
               <p className="mt-1 whitespace-pre-wrap">{content}</p>
               {(m as Record<string, unknown>).metadata ? (
                 <div className="mt-2">
@@ -353,7 +353,7 @@ function ItinerariesSection({ userId }: { userId: number }) {
   return (
     <div className="space-y-2">
       {items.map((it, i) => (
-        <div key={i} className="rounded border bg-white p-3">
+        <div key={i} className="rounded border border-border bg-surface p-3">
           <JsonBlock data={it} />
         </div>
       ))}
@@ -395,7 +395,7 @@ function AuditTab() {
     <div>
       {/* filters */}
       <div className="mb-4 flex flex-wrap items-end gap-3">
-        <label className="text-xs text-gray-500">
+        <label className="text-xs text-muted">
           User ID
           <input
             className="ml-1 w-20 rounded border px-2 py-1 text-xs"
@@ -403,7 +403,7 @@ function AuditTab() {
             onChange={(e) => { setFilterUser(e.target.value); setPage(0); }}
           />
         </label>
-        <label className="text-xs text-gray-500">
+        <label className="text-xs text-muted">
           Endpoint
           <input
             className="ml-1 w-32 rounded border px-2 py-1 text-xs"
@@ -411,7 +411,7 @@ function AuditTab() {
             onChange={(e) => { setFilterEndpoint(e.target.value); setPage(0); }}
           />
         </label>
-        <label className="text-xs text-gray-500">
+        <label className="text-xs text-muted">
           Trace ID
           <input
             className="ml-1 w-48 rounded border px-2 py-1 text-xs"
@@ -419,15 +419,15 @@ function AuditTab() {
             onChange={(e) => { setFilterTrace(e.target.value); setPage(0); }}
           />
         </label>
-        <button onClick={load} className="rounded bg-indigo-600 px-3 py-1 text-xs text-white hover:bg-indigo-700">
+        <button onClick={load} className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90">
           Search
         </button>
       </div>
 
       {/* table */}
-      <div className="overflow-x-auto rounded border bg-white">
+      <div className="overflow-x-auto rounded border border-border bg-surface">
         <table className="w-full text-xs">
-          <thead className="bg-gray-100 text-left text-gray-600">
+          <thead className="bg-surface-muted text-left text-muted-foreground">
             <tr>
               <th className="px-3 py-2">ID</th>
               <th className="px-3 py-2">Trace</th>
@@ -446,7 +446,7 @@ function AuditTab() {
             ))}
             {logs.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-gray-400">
+                <td colSpan={9} className="px-3 py-6 text-center text-muted">
                   No logs
                 </td>
               </tr>
@@ -456,7 +456,7 @@ function AuditTab() {
       </div>
 
       {/* pager */}
-      <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
+      <div className="mt-3 flex items-center justify-between text-xs text-muted">
         <span>{total} results</span>
         <div className="flex gap-2">
           <button
@@ -486,7 +486,7 @@ function AuditRow({ log }: { log: AuditLog }) {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <tr className="border-t hover:bg-gray-50">
+      <tr className="border-t border-border hover:bg-surface-muted/50">
         <td className="px-3 py-2">{log.id}</td>
         <td className="max-w-[100px] truncate px-3 py-2" title={log.trace_id}>{log.trace_id || "-"}</td>
         <td className="px-3 py-2">{log.user_id ?? "-"}</td>
@@ -502,13 +502,13 @@ function AuditRow({ log }: { log: AuditLog }) {
         </td>
         <td className="whitespace-nowrap px-3 py-2">{formatDate(log.created_at)}</td>
         <td className="px-3 py-2">
-          <button onClick={() => setOpen(!open)} className="text-indigo-600 underline">
+          <button onClick={() => setOpen(!open)} className="text-primary underline">
             {open ? "hide" : "show"}
           </button>
         </td>
       </tr>
       {open && (
-        <tr className="border-t bg-gray-50">
+        <tr className="border-t border-border bg-surface-muted/50">
           <td colSpan={9} className="space-y-3 px-4 py-3">
             <DetailBlock title="Request" data={log.request_json} />
             <DetailBlock title="Response" data={log.response_json} />
@@ -526,7 +526,7 @@ function DetailBlock({ title, data }: { title: string; data: unknown }) {
   if (!data || (typeof data === "object" && Object.keys(data as Record<string, unknown>).length === 0)) return null;
   return (
     <div>
-      <p className="text-xs font-semibold text-gray-500">{title}</p>
+      <p className="text-xs font-semibold text-muted">{title}</p>
       <JsonBlock data={data} />
     </div>
   );
@@ -538,13 +538,13 @@ function DetailBlock({ title, data }: { title: string; data: unknown }) {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="rounded border bg-white p-4">
-      <h3 className="mb-2 text-sm font-semibold text-gray-600">{title}</h3>
+    <div className="rounded border border-border bg-surface p-4">
+      <h3 className="mb-2 text-sm font-semibold text-muted-foreground">{title}</h3>
       {children}
     </div>
   );
 }
 
 function Empty() {
-  return <p className="py-4 text-center text-xs text-gray-400">No data</p>;
+  return <p className="py-4 text-center text-xs text-muted">No data</p>;
 }

@@ -13,12 +13,21 @@ interface TabItem {
 interface TabsProps {
   items: TabItem[];
   activeId: string;
+  /** 若提供，與 activeId 併用：id 在陣列中或等於 activeId 時顯示為作用中 */
+  activeIds?: string[];
   onChange: (id: string) => void;
   variant?: "default" | "pill";
   className?: string;
 }
 
-export function Tabs({ items, activeId, onChange, variant = "default", className }: TabsProps) {
+function isTabActive(id: string, activeId: string, activeIds: string[] | undefined) {
+  if (activeIds && activeIds.length > 0) {
+    return activeIds.includes(id);
+  }
+  return activeId === id;
+}
+
+export function Tabs({ items, activeId, activeIds, onChange, variant = "default", className }: TabsProps) {
   if (variant === "pill") {
     return (
       <div className={cn("flex items-center gap-1", className)}>
@@ -28,7 +37,7 @@ export function Tabs({ items, activeId, onChange, variant = "default", className
             onClick={() => onChange(item.id)}
             className={cn(
               "flex items-center gap-1.5 rounded-btn px-4 py-2 text-sm font-medium transition-colors",
-              activeId === item.id
+              isTabActive(item.id, activeId, activeIds)
                 ? "bg-primary text-primary-foreground"
                 : "text-muted hover:bg-surface-muted"
             )}
@@ -46,27 +55,30 @@ export function Tabs({ items, activeId, onChange, variant = "default", className
 
   return (
     <div className={cn("flex items-center gap-6 border-b border-border", className)}>
-      {items.map((item) => (
-        <button
-          key={item.id}
-          onClick={() => onChange(item.id)}
-          className={cn(
-            "relative flex items-center gap-1.5 pb-3 text-sm font-medium transition-colors",
-            activeId === item.id
-              ? "text-primary"
-              : "text-muted hover:text-primary"
-          )}
-        >
-          {item.icon}
-          {item.label}
-          {item.count !== undefined && (
-            <span className="text-xs text-muted">{item.count}</span>
-          )}
-          {activeId === item.id && (
-            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
-          )}
-        </button>
-      ))}
+      {items.map((item) => {
+        const active = isTabActive(item.id, activeId, activeIds);
+        return (
+          <button
+            key={item.id}
+            onClick={() => onChange(item.id)}
+            className={cn(
+              "relative flex items-center gap-1.5 pb-3 text-sm font-medium transition-colors",
+              active
+                ? "text-primary"
+                : "text-muted hover:text-primary"
+            )}
+          >
+            {item.icon}
+            {item.label}
+            {item.count !== undefined && (
+              <span className="text-xs text-muted">{item.count}</span>
+            )}
+            {active && (
+              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

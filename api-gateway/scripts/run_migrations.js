@@ -4,13 +4,14 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import dotenv from "dotenv";
 
-dotenv.config();
-
-const { Pool } = pg;
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..", "..");
+dotenv.config({ path: path.join(repoRoot, ".env") });
+dotenv.config({ path: path.join(repoRoot, ".env.local") });
+dotenv.config();
+
+const { Pool } = pg;
 const migrationsDir = path.resolve(repoRoot, "scripts", "migrations");
 const databaseUrl = process.env.DATABASE_URL || "postgresql://aiyo:aiyo_password@localhost:5432/aiyo_db";
 const dryRun = process.argv.includes("--dry-run");

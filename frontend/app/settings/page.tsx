@@ -15,11 +15,17 @@ import {
   KeyRound,
 } from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
-import { API_BASE_URL, apiFetchWithAuth, getAccessToken } from "@/lib/api";
+import { API_BASE_URL, apiFetchWithAuth, getAccessToken, clearAccessToken } from "@/lib/api";
 import { useAuthUser } from "@/lib/hooks/useAuthUser";
 import { cn } from "@/lib/utils";
 
 type SettingsTab = "profile" | "account" | "travel" | "notifications";
+
+type PasswordForm = {
+  currentPassword: string;
+  newPassword: string;
+  confirmNewPassword: string;
+};
 
 type UserProfile = {
   display_name?: string | null;
@@ -53,6 +59,12 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [memoryItems, setMemoryItems] = useState<Array<{ id: number; memory_text: string; memory_type: string }>>([]);
   const [memoryReviewing, setMemoryReviewing] = useState(false);
+  const [pwForm, setPwForm] = useState<PasswordForm>({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwNotice, setPwNotice] = useState<string | null>(null);
+  const [pwError, setPwError] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const NOTIFICATION_STORAGE_KEY = "aiyo_notification_prefs";
   const defaultNotif = {
@@ -100,7 +112,7 @@ export default function SettingsPage() {
           apiFetchWithAuth(`${API_BASE_URL}/api/user/ai-settings`),
           apiFetchWithAuth(`${API_BASE_URL}/api/user/memory?limit=8`),
         ]);
-        if (meRes.status === 401) { router.replace("/login"); return; }
+        if (meRes.status === 401) { clearAccessToken(); router.replace("/login"); return; }
         if (meRes.ok) {
           const data = (await meRes.json()) as { user?: { email?: string } };
           setAuthEmail(data.user?.email ?? "");
@@ -207,10 +219,69 @@ export default function SettingsPage() {
   }
 
   function handleLogout() {
-    if (typeof window !== "undefined") {
-      window.localStorage.removeItem("aiyo_token");
-    }
+    clearAccessToken();
     router.replace("/login");
+  }
+
+  async function handleChangePassword(e: FormEvent) {
+    e.preventDefault();
+    setPwError(null);
+    setPwNotice(null);
+    if (!pwForm.currentPassword || !pwForm.newPassword) {
+      setPwError("請填寫所有密碼欄位。");
+      return;
+    }
+    if (pwForm.newPassword.length < 6) {
+      setPwError("新密碼至少 6 個字元。");
+      return;
+    }
+    if (pwForm.newPassword !== pwForm.confirmNewPassword) {
+      setPwError("兩次輸入的新密碼不一致。");
+      return;
+    }
+    setPwSaving(true);
+    try {
+      const res = await apiFetchWithAuth(`${API_BASE_URL}/api/auth/change-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentPassword: pwForm.currentPassword,
+          newPassword: pwForm.newPassword,
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || "變更密碼失敗");
+      }
+      setPwNotice("密碼已成功變更。");
+      setPwForm({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
+    } catch (err) {
+      setPwError(err instanceof Error ? err.message : "變更密碼失敗");
+    } finally {
+      setPwSaving(false);
+    }
+  }
+
+  async function handleDeleteAccount() {
+    setDeleting(true);
+    setError(null);
+    try {
+      const res = await apiFetchWithAuth(`${API_BASE_URL}/api/auth/account`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || "刪除帳戶失敗");
+      }
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem("aiyo_token");
+      }
+      router.replace("/login");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "刪除帳戶失敗");
+      setDeleting(false);
+      setDeleteConfirm(false);
+    }
   }
 
   const tabItems = [
@@ -237,7 +308,7 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        <div className="mx-auto max-w-2xl px-8 py-8">
+        <div className="mx-auto max-w-4xl px-8 py-8 animate-page-enter">
           {notice && (
             <div className="mb-6 rounded-lg bg-success/10 px-4 py-3 text-sm text-success">
               {notice}
@@ -304,15 +375,44 @@ export default function SettingsPage() {
                   <KeyRound size={18} className="text-muted" />
                   <h3 className="text-sm font-semibold text-primary">變更密碼</h3>
                 </div>
-                <p className="text-xs text-muted mb-4">
-                  變更密碼功能即將推出，屆時可在此設定新密碼以提升帳戶安全。
-                </p>
-                <div className="space-y-3 opacity-60 pointer-events-none">
-                  <Input label="目前密碼" type="password" placeholder="請輸入目前密碼" disabled />
-                  <Input label="新密碼" type="password" placeholder="請輸入新密碼（至少 6 碼）" disabled />
-                  <Input label="確認新密碼" type="password" placeholder="再次輸入新密碼" disabled />
-                  <Button size="sm" disabled>即將推出</Button>
-                </div>
+                {pwNotice && (
+                  <div className="mb-4 rounded-lg bg-success/10 px-4 py-3 text-sm text-success">{pwNotice}</div>
+                )}
+                {pwError && (
+                  <div className="mb-4 rounded-lg bg-danger/10 px-4 py-3 text-sm text-danger">{pwError}</div>
+                )}
+                <form onSubmit={handleChangePassword} className="space-y-3">
+                  <Input
+                    label="目前密碼"
+                    type="password"
+                    placeholder="請輸入目前密碼"
+                    value={pwForm.currentPassword}
+                    onChange={(e) => setPwForm((prev) => ({ ...prev, currentPassword: e.target.value }))}
+                    disabled={pwSaving}
+                    autoComplete="current-password"
+                  />
+                  <Input
+                    label="新密碼"
+                    type="password"
+                    placeholder="請輸入新密碼（至少 6 碼）"
+                    value={pwForm.newPassword}
+                    onChange={(e) => setPwForm((prev) => ({ ...prev, newPassword: e.target.value }))}
+                    disabled={pwSaving}
+                    autoComplete="new-password"
+                  />
+                  <Input
+                    label="確認新密碼"
+                    type="password"
+                    placeholder="再次輸入新密碼"
+                    value={pwForm.confirmNewPassword}
+                    onChange={(e) => setPwForm((prev) => ({ ...prev, confirmNewPassword: e.target.value }))}
+                    disabled={pwSaving}
+                    autoComplete="new-password"
+                  />
+                  <Button type="submit" size="sm" disabled={pwSaving}>
+                    {pwSaving ? "變更中..." : "變更密碼"}
+                  </Button>
+                </form>
               </div>
 
               <div className="rounded-card border border-border p-5">
@@ -393,18 +493,61 @@ export default function SettingsPage() {
                 <p className="mt-1 text-sm text-muted">
                   登出後需重新登入。刪除帳戶將永久移除所有資料。
                 </p>
-                <div className="mt-4 flex items-center gap-3">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleLogout}
-                  >
-                    <LogOut size={14} className="mr-1.5" />
-                    登出
-                  </Button>
-                  <Button variant="outline" size="sm" className="border-danger text-danger hover:bg-danger/10">
-                    刪除帳戶
-                  </Button>
+                <div className="mt-4 flex flex-col gap-3">
+                  <div className="flex items-center gap-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleLogout}
+                    >
+                      <LogOut size={14} className="mr-1.5" />
+                      登出
+                    </Button>
+                    {!deleteConfirm ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="border-danger text-danger hover:bg-danger/10"
+                        onClick={() => setDeleteConfirm(true)}
+                      >
+                        刪除帳戶
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="border-danger text-danger hover:bg-danger/10"
+                        onClick={() => setDeleteConfirm(false)}
+                      >
+                        取消
+                      </Button>
+                    )}
+                  </div>
+                  {deleteConfirm && (
+                    <div className="rounded-lg border border-danger/30 bg-danger/5 p-4">
+                      <p className="text-sm text-danger font-medium">
+                        確定要刪除帳戶嗎？此操作無法復原，所有資料將被永久移除。
+                      </p>
+                      <div className="mt-3 flex gap-3">
+                        <Button
+                          size="sm"
+                          className="bg-danger text-white hover:bg-danger/90"
+                          onClick={() => void handleDeleteAccount()}
+                          disabled={deleting}
+                        >
+                          {deleting ? "刪除中..." : "確認刪除帳戶"}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setDeleteConfirm(false)}
+                          disabled={deleting}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

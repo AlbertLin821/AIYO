@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ChevronDown, Users, UserPlus, Link2, ExternalLink } from "lucide-react";
+import { ChevronDown, Users, UserPlus, Link2, ExternalLink, MapPin } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Tag } from "@/components/ui/tag";
@@ -68,8 +68,9 @@ export function TopBar({
             <button
               type="button"
               onClick={() => setTripMenuOpen((v) => !v)}
-              className="flex items-center gap-1 text-sm font-medium text-primary hover:opacity-70 transition-opacity"
+              className="flex items-center gap-1.5 text-sm font-medium text-primary hover:opacity-70 transition-opacity"
             >
+              <MapPin size={16} className="shrink-0 text-travel-ocean" aria-hidden />
               {tripName}
               <ChevronDown size={14} />
             </button>
@@ -102,7 +103,10 @@ export function TopBar({
           </>
         )}
         {!tripName && (
-          <span className="text-sm font-medium text-primary">New chat</span>
+          <span className="flex items-center gap-1.5 text-sm font-medium text-primary">
+            <MapPin size={16} className="shrink-0 text-travel-ocean/70" aria-hidden />
+            New chat
+          </span>
         )}
       </div>
 

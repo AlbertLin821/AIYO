@@ -2,6 +2,8 @@
 .env
 .env.local
 .env.*.local
+.env.production
+.env.development
 
 # 依賴目錄
 node_modules/
@@ -15,9 +17,55 @@ env/
 dist/
 build/
 .next/
+out/
 *.egg-info/
 
 # 日誌與暫存
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# TypeScript 增量建置
+*.tsbuildinfo
+
+# 測試覆蓋率與靜態分析快取
+coverage/
+htmlcov/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+.playwright-mcp/
+
+# Cursor：計畫檔為本機產生，不納入版控（.cursor/.mcp.json 等仍可選擇提交）
+.cursor/plans/
+
+# IDE
+.idea/
+
+# 本機 Docker 覆寫（可含本機路徑或埠）
+docker-compose.override.yml
+
+# 金鑰與憑證（避免誤提交）
+*.pem
+*.p12
+id_rsa
+id_rsa.pub
+*.key
+
+# 本機暫存目錄（僅根目錄）
+/tmp/

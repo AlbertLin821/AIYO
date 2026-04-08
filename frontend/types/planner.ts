@@ -51,6 +51,19 @@ export type RecommendedSegment = {
   start_sec: number;
   end_sec: number;
   summary?: string;
+  tags?: string[];
+  city?: string;
+};
+
+export type FullSegment = {
+  id: number;
+  video_id: number;
+  start_sec: number;
+  end_sec: number;
+  summary: string;
+  tags: string[] | null;
+  city: string | null;
+  created_at: string;
 };
 
 export type RecommendedVideo = {
@@ -179,4 +192,5 @@ export type TimelineItem = {
   stayMinutes: number;
   travelMinutesFromPrev: number;
   travelModeFromPrev: TransportMode;
+  travelDistanceFromPrev?: string;
 };

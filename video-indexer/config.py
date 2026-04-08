@@ -38,3 +38,7 @@ def get_ollama_base_url() -> str:
 
 def get_ollama_model() -> str:
     return os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+
+
+def get_ollama_embed_model() -> str:
+    return os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")

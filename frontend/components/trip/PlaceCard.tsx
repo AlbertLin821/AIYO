@@ -1,15 +1,23 @@
 "use client";
 
-import { MoreHorizontal, ExternalLink, GripVertical } from "lucide-react";
+import { MoreHorizontal, ExternalLink, GripVertical, Car, Bus, Bike, PersonStanding } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Place } from "@/types/planner";
+import type { Place, TransportMode } from "@/types/planner";
+
+export interface LegTransport {
+  minutes: number;
+  mode: TransportMode;
+  distance: string;
+}
 
 interface PlaceCardProps {
   place: Place;
   index: number;
   timeStart?: string;
   timeEnd?: string;
-  distanceFromPrev?: string;
+  /** 與上一個景點之間的交通段（僅 index > 0） */
+  legFromPrev?: LegTransport | null;
+  onTransportModeChange?: (mode: TransportMode) => void;
   onDragStart?: () => void;
   onDrop?: () => void;
   onRemove?: () => void;
@@ -18,12 +26,20 @@ interface PlaceCardProps {
   className?: string;
 }
 
+const MODE_BUTTONS: { mode: TransportMode; Icon: typeof Car; label: string }[] = [
+  { mode: "drive", Icon: Car, label: "開車" },
+  { mode: "transit", Icon: Bus, label: "大眾運輸" },
+  { mode: "bike", Icon: Bike, label: "騎車" },
+  { mode: "walk", Icon: PersonStanding, label: "步行" },
+];
+
 export function PlaceCard({
   place,
   index,
   timeStart,
   timeEnd,
-  distanceFromPrev,
+  legFromPrev,
+  onTransportModeChange,
   onDragStart,
   onDrop,
   onRemove,
@@ -33,9 +49,34 @@ export function PlaceCard({
 }: PlaceCardProps) {
   return (
     <div className={cn("group", className)}>
-      {distanceFromPrev && (
-        <div className="flex items-center gap-2 py-1 pl-14">
-          <span className="text-xs text-muted">{distanceFromPrev}</span>
+      {legFromPrev && onTransportModeChange && (
+        <div className="space-y-1.5 py-1 pl-14">
+          <div className="flex flex-wrap items-center gap-1">
+            {MODE_BUTTONS.map(({ mode, Icon, label }) => {
+              const active = legFromPrev.mode === mode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  title={label}
+                  aria-label={label}
+                  aria-pressed={active}
+                  onClick={() => onTransportModeChange(mode)}
+                  className={cn(
+                    "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors",
+                    active
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-surface text-muted hover:bg-surface-muted"
+                  )}
+                >
+                  <Icon size={14} />
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-muted">
+            {legFromPrev.minutes} min · {legFromPrev.distance}
+          </p>
         </div>
       )}
       <div

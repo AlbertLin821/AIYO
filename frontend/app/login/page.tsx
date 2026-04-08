@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001").replace(/\/$/, "");
 
-type AuthStep = "email" | "login" | "register";
+type AuthStep = "email" | "login" | "register" | "forgot-password";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,6 +18,9 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [resetSuccess, setResetSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,7 +39,20 @@ export default function LoginPage() {
       return;
     }
     setError(null);
-    setStep("login");
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/auth/check-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { exists?: boolean };
+      setStep(data.exists ? "login" : "register");
+    } catch {
+      setStep("login");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function handleAuth(e: FormEvent) {
@@ -88,10 +104,47 @@ export default function LoginPage() {
     }
   }
 
+  async function handleResetPassword(e: FormEvent) {
+    e.preventDefault();
+    if (!newPassword.trim()) {
+      setError("Please enter a new password.");
+      return;
+    }
+    if (newPassword.length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setError(null);
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), newPassword }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "Password reset failed.");
+      }
+      setResetSuccess(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function handleChangeEmail() {
     setStep("email");
     setPassword("");
     setConfirmPassword("");
+    setNewPassword("");
+    setConfirmNewPassword("");
+    setResetSuccess(false);
     setError(null);
   }
 
@@ -150,9 +203,9 @@ export default function LoginPage() {
 
       {/* Auth Modal */}
       <div className="fixed inset-0 z-50 flex items-center justify-center">
-        <div className="absolute inset-0 bg-black/20" />
+        <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" aria-hidden />
 
-        <div className="relative z-10 w-full max-w-md rounded-2xl bg-surface p-8 shadow-modal animate-slide-up mx-4">
+        <div className="relative z-10 w-full max-w-md rounded-card border border-border/60 bg-surface p-8 shadow-modal animate-slide-up mx-4">
           {/* 關閉：離開登入流程並返回首頁 */}
           <button
             onClick={() => router.push("/home")}
@@ -227,6 +280,16 @@ export default function LoginPage() {
                 <p className="mt-1 text-sm text-muted">登入你的帳號</p>
               </div>
 
+              <input
+                type="email"
+                value={email}
+                autoComplete="username"
+                readOnly
+                tabIndex={-1}
+                aria-hidden="true"
+                className="sr-only"
+              />
+
               <div className="flex items-center justify-between rounded-lg border border-border bg-surface-muted/30 px-4 py-2.5">
                 <span className="text-sm text-primary truncate mr-2">{email}</span>
                 <button
@@ -238,36 +301,33 @@ export default function LoginPage() {
                 </button>
               </div>
 
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-primary">密碼</label>
-                <div className="relative flex items-center rounded-lg border border-border bg-surface focus-within:ring-1 focus-within:ring-primary/10 focus-within:border-primary">
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    placeholder="請輸入密碼"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    disabled={loading}
-                    autoFocus
-                    className="flex h-11 flex-1 bg-transparent px-4 py-2 text-sm text-primary placeholder:text-muted outline-none disabled:opacity-50"
-                  />
+              <Input
+                type={showPassword ? "text" : "password"}
+                label="密碼"
+                placeholder="請輸入密碼"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={loading}
+                autoFocus
+                endAdornment={
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
-                    className="flex h-11 items-center justify-center px-3 text-muted hover:text-primary transition-colors"
+                    className="flex h-9 w-9 items-center justify-center rounded-md text-muted transition-colors hover:text-primary"
                     aria-label={showPassword ? "隱藏密碼" : "顯示密碼"}
                   >
                     {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
-                </div>
-              </div>
+                }
+              />
 
               <div className="flex items-center justify-between text-sm">
                 <button
                   type="button"
                   className="text-muted hover:text-primary hover:underline"
-                  onClick={() => setError(null)}
+                  onClick={() => { setError(null); setStep("forgot-password"); }}
                 >
-                  忘記密碼？
+                  Forgot password?
                 </button>
               </div>
 
@@ -305,6 +365,16 @@ export default function LoginPage() {
                 <p className="mt-1 text-sm text-muted">註冊 AIYO 免費又快速。</p>
               </div>
 
+              <input
+                type="email"
+                value={email}
+                autoComplete="username"
+                readOnly
+                tabIndex={-1}
+                aria-hidden="true"
+                className="sr-only"
+              />
+
               <div className="flex items-center justify-between rounded-lg border border-border bg-surface-muted/30 px-4 py-2.5">
                 <span className="text-sm text-primary truncate mr-2">{email}</span>
                 <button
@@ -316,42 +386,37 @@ export default function LoginPage() {
                 </button>
               </div>
 
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-primary">密碼（至少 6 個字元）</label>
-                <div className="relative flex items-center rounded-lg border border-border bg-surface focus-within:ring-1 focus-within:ring-primary/10 focus-within:border-primary">
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    placeholder="請設定密碼"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    disabled={loading}
-                    autoFocus
-                    className="flex h-11 flex-1 bg-transparent px-4 py-2 text-sm text-primary placeholder:text-muted outline-none disabled:opacity-50"
-                  />
+              <Input
+                type={showPassword ? "text" : "password"}
+                label="密碼（至少 6 個字元）"
+                placeholder="請設定密碼"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={loading}
+                autoFocus
+                autoComplete="new-password"
+                endAdornment={
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
-                    className="flex h-11 items-center justify-center px-3 text-muted hover:text-primary transition-colors"
+                    className="flex h-9 w-9 items-center justify-center rounded-md text-muted transition-colors hover:text-primary"
                     aria-label={showPassword ? "隱藏密碼" : "顯示密碼"}
                   >
                     {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
-                </div>
-              </div>
+                }
+              />
 
-              <div className="space-y-1">
-                <label className="text-sm font-medium text-primary">確認密碼</label>
-                <div className="relative flex items-center rounded-lg border border-border bg-surface focus-within:ring-1 focus-within:ring-primary/10 focus-within:border-primary">
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    placeholder="再次輸入密碼"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    disabled={loading}
-                    className="flex h-11 flex-1 bg-transparent px-4 py-2 text-sm text-primary placeholder:text-muted outline-none disabled:opacity-50"
-                  />
-                </div>
-              </div>
+              <Input
+                type={showPassword ? "text" : "password"}
+                label="確認密碼"
+                placeholder="再次輸入密碼"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                disabled={loading}
+                id="password-confirm-register"
+                autoComplete="new-password"
+              />
 
               {error && <p className="text-sm text-danger">{error}</p>}
 
@@ -385,6 +450,98 @@ export default function LoginPage() {
                 <Link href="/privacy" className="text-primary underline">隱私政策</Link>。
               </p>
             </form>
+          )}
+
+          {step === "forgot-password" && (
+            <div className="space-y-5">
+              <div className="pt-2">
+                <h2 className="text-2xl font-bold text-primary">Reset password</h2>
+                <p className="mt-1 text-sm text-muted">Enter a new password for your account.</p>
+              </div>
+
+              <div className="flex items-center justify-between rounded-lg border border-border bg-surface-muted/30 px-4 py-2.5">
+                <span className="text-sm text-primary truncate mr-2">{email}</span>
+                <button
+                  type="button"
+                  onClick={handleChangeEmail}
+                  className="text-sm font-medium text-primary hover:underline shrink-0"
+                >
+                  Change
+                </button>
+              </div>
+
+              {resetSuccess ? (
+                <div className="rounded-lg border border-success/30 bg-success/5 p-4">
+                  <p className="text-sm font-medium text-primary">
+                    Password has been reset successfully.
+                  </p>
+                  <Button
+                    className="mt-3 w-full"
+                    onClick={() => {
+                      setStep("login");
+                      setNewPassword("");
+                      setConfirmNewPassword("");
+                      setResetSuccess(false);
+                      setError(null);
+                    }}
+                  >
+                    Back to login
+                  </Button>
+                </div>
+              ) : (
+                <form onSubmit={handleResetPassword} className="space-y-4">
+                  <Input
+                    type={showPassword ? "text" : "password"}
+                    label="New password (at least 6 characters)"
+                    placeholder="Enter new password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    disabled={loading}
+                    autoFocus
+                    autoComplete="new-password"
+                    endAdornment={
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="flex h-9 w-9 items-center justify-center rounded-md text-muted transition-colors hover:text-primary"
+                        aria-label={showPassword ? "Hide password" : "Show password"}
+                      >
+                        {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                      </button>
+                    }
+                  />
+
+                  <Input
+                    type={showPassword ? "text" : "password"}
+                    label="Confirm new password"
+                    placeholder="Re-enter new password"
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                    disabled={loading}
+                    autoComplete="new-password"
+                  />
+
+                  {error && <p className="text-sm text-danger">{error}</p>}
+
+                  <Button type="submit" className="w-full" disabled={loading}>
+                    {loading ? "Resetting..." : "Reset password"}
+                  </Button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStep("login");
+                      setNewPassword("");
+                      setConfirmNewPassword("");
+                      setError(null);
+                    }}
+                    className="w-full text-center text-sm font-medium text-primary hover:underline"
+                  >
+                    Back to login
+                  </button>
+                </form>
+              )}
+            </div>
           )}
         </div>
       </div>

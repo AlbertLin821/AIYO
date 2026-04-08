@@ -103,6 +103,37 @@ async def infer_weather_region(
     return {"region": "", "location_source": "none"}
 
 
+def _parse_geocode_result(lat: float, lng: float, name: str, country: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+        return None
+    return {"latitude": lat, "longitude": lng, "name": name or "", "country": country or ""}
+
+
+async def _geocode_region_nominatim(region: str, user_agent: str) -> Optional[Dict[str, Any]]:
+    """當 Open-Meteo 無結果時使用 Nominatim 解析地名（支援日文等，如熊本）。"""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
+        response = await client.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": region, "format": "json", "limit": 1},
+            headers={"User-Agent": user_agent},
+        )
+    if response.status_code >= 400:
+        return None
+    data = response.json() if response.content else []
+    if not isinstance(data, list) or not data:
+        return None
+    top = data[0]
+    try:
+        lat = float(top.get("lat"))
+        lng = float(top.get("lon"))
+    except (TypeError, ValueError):
+        return None
+    name = (top.get("display_name") or "").split(",")[0].strip() or top.get("name") or region
+    address = top.get("address") or {}
+    country = address.get("country", "") if isinstance(address, dict) else ""
+    return _parse_geocode_result(lat, lng, name, country)
+
+
 async def get_weather(region: str, user_agent: str, query: str, location_source: str) -> ToolResult:
     if not region.strip():
         return make_tool_result(
@@ -121,13 +152,28 @@ async def get_weather(region: str, user_agent: str, query: str, location_source:
             return make_tool_result(ok=False, source="open-meteo", error=f"geocoding error: {geo.status_code}")
         geo_data = geo.json() if geo.content else {}
         geo_rows = geo_data.get("results") if isinstance(geo_data, dict) else None
-        if not isinstance(geo_rows, list) or not geo_rows:
-            return make_tool_result(ok=False, source="open-meteo", error="geocoding no result")
-        top = geo_rows[0]
-        lat = top.get("latitude")
-        lng = top.get("longitude")
-        if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
-            return make_tool_result(ok=False, source="open-meteo", error="geocoding invalid coordinates")
+        if isinstance(geo_rows, list) and geo_rows:
+            top = geo_rows[0]
+            lat = top.get("latitude")
+            lng = top.get("longitude")
+            if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+                resolved_name = top.get("name") or region
+                country = top.get("country") or ""
+            else:
+                top = None
+        else:
+            top = None
+        if top is None:
+            nominatim = await _geocode_region_nominatim(region, user_agent)
+            if not nominatim:
+                return make_tool_result(ok=False, source="open-meteo", error="geocoding no result")
+            lat = nominatim["latitude"]
+            lng = nominatim["longitude"]
+            resolved_name = nominatim["name"]
+            country = nominatim["country"]
+        else:
+            resolved_name = top.get("name") or region
+            country = top.get("country") or ""
         weather = await client.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
@@ -147,8 +193,8 @@ async def get_weather(region: str, user_agent: str, query: str, location_source:
         data={
             "query": query,
             "region": region,
-            "resolved_name": top.get("name"),
-            "country": top.get("country"),
+            "resolved_name": resolved_name,
+            "country": country,
             "timezone": weather_data.get("timezone"),
             "current": (weather_data.get("current") or {}),
             "location_source": location_source,

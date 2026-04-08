@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { API_BASE_URL, apiFetchWithAuth, getAccessToken } from "@/lib/api";
+import { API_BASE_URL, apiFetchWithAuth, clearAccessToken, getAccessToken } from "@/lib/api";
 
 export type AuthUser = {
   name: string;
@@ -36,6 +36,7 @@ export function useAuthUser(): { user: AuthUser | null; loading: boolean } {
         const part = email.split("@")[0] || "User";
         setUser({ name: part, username: part, avatar: undefined });
       } catch {
+        clearAccessToken();
         if (active) setUser(null);
       } finally {
         if (active) setLoading(false);

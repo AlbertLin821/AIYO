@@ -39,12 +39,13 @@ export function Modal({ open, onClose, children, className, maxWidth = "max-w-md
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div
-        className="absolute inset-0 bg-black/40 animate-fade-in"
+        className="absolute inset-0 bg-black/40 animate-fade-in backdrop-blur-[2px]"
         onClick={onClose}
+        aria-hidden
       />
       <div
         className={cn(
-          "relative z-10 w-full rounded-2xl bg-surface p-6 shadow-modal animate-slide-up",
+          "relative z-10 w-full rounded-card bg-surface p-6 shadow-modal animate-slide-up border border-border/60",
           maxWidth,
           className
         )}

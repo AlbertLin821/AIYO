@@ -25,6 +25,8 @@ export function Avatar({ src, alt, fallback, size = "md", className, ...props }:
       {...props}
     >
       {src ? (
+        // 使用者頭像網址可能由後端動態提供，網域無法事先完整列於 next/image 白名單，故保留原生 img。
+        // eslint-disable-next-line @next/next/no-img-element -- 動態外部頭像網址
         <img
           src={src}
           alt={alt || ""}

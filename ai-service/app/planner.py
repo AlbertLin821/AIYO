@@ -75,6 +75,28 @@ def estimate_travel_minutes(distance_km: float, mode: str) -> int:
     return max(5, int((distance_km / speed) * 60) + overhead)
 
 
+def _normalize_place_key(name: str) -> str:
+    if not name:
+        return ""
+    key = name.strip().lower()
+    key = key.replace("（", "(").replace("）", ")")
+    if "(" in key:
+        key = key.split("(", 1)[0].strip()
+    key = key.replace("·", " ").replace("-", " ")
+    return " ".join(key.split())
+
+
+def _normalize_estimated_cost(raw_cost: Any) -> float:
+    try:
+        cost = float(raw_cost or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(cost) or cost <= 0:
+        return 0.0
+    # 單一景點成本設上限，避免異常值導致整體預算估算失真。
+    return min(cost, 2500.0)
+
+
 def _to_google_mode(mode: str) -> str:
     mapping = {
         "drive": "driving",
@@ -171,6 +193,7 @@ def plan_itinerary_v2(
     seg_index = 0
     total_cost = 0.0
     global_warnings: List[str] = []
+    used_place_keys: Set[str] = set()
 
     for day_num in range(1, days_count + 1):
         day = PlannerDay(day_number=day_num)
@@ -185,10 +208,15 @@ def plan_itinerary_v2(
             seg_index += 1
 
             name = (seg.get("place_name") or seg.get("name") or "").strip()
-            cost = float(seg.get("estimated_cost") or seg.get("cost") or 0)
+            cost = _normalize_estimated_cost(seg.get("estimated_cost") or seg.get("cost") or 0)
             stay = int(seg.get("stay_minutes") or seg.get("stay") or 60)
             lat = seg.get("lat")
             lng = seg.get("lng")
+            place_key = _normalize_place_key(name)
+
+            if place_key and place_key in used_place_keys:
+                day.warnings.append(f"「{name}」與既有景點高度重複，已略過")
+                continue
 
             if constraints.budget_per_day and (day_cost + cost) > constraints.budget_per_day:
                 day.warnings.append(f"「{name}」超出每日預算，已略過")
@@ -232,6 +260,8 @@ def plan_itinerary_v2(
 
             day_cost += cost
             slots_this_day.append(slot)
+            if place_key:
+                used_place_keys.add(place_key)
 
             if name.lower() in must_visit_set:
                 placed_must_visit.add(name.lower())

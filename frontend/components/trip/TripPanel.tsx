@@ -1,12 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, Undo2, Redo2, LayoutGrid, Plus } from "lucide-react";
+import { ChevronDown, Undo2, Redo2, LayoutGrid, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tabs } from "@/components/ui/tabs";
 import { Tag } from "@/components/ui/tag";
 import { Button } from "@/components/ui/button";
-import type { Place, DayPlan, TimelineItem } from "@/types/planner";
+import type { Place, DayPlan, TimelineItem, TransportMode } from "@/types/planner";
 import { PlaceCard } from "./PlaceCard";
 
 interface TripPanelProps {
@@ -32,7 +32,10 @@ interface TripPanelProps {
   onPlaceDragStart?: (index: number) => void;
   onPlaceDrop?: (index: number) => void;
   onAddDay?: () => void;
+  onDeleteDay?: (dayId: string) => void;
   onEditDayLabel?: (dayId: string) => void;
+  /** legIndex：第幾段（0 表示第 1 個景點與第 2 個景點之間） */
+  onLegTransportModeChange?: (legIndex: number, mode: TransportMode) => void;
   onSave?: () => void;
   className?: string;
 }
@@ -60,7 +63,9 @@ export function TripPanel({
   onPlaceDragStart,
   onPlaceDrop,
   onAddDay,
+  onDeleteDay,
   onEditDayLabel,
+  onLegTransportModeChange,
   onSave,
   className,
 }: TripPanelProps) {
@@ -112,7 +117,11 @@ export function TripPanel({
             >
               <Redo2 size={16} />
             </button>
-            <button className="flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-surface-muted transition-colors">
+            <button
+              className="flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-surface-muted transition-colors"
+              onClick={() => setShowDistances((v) => !v)}
+              title={showDistances ? "Switch to compact view" : "Switch to detailed view"}
+            >
               <LayoutGrid size={16} />
             </button>
           </div>
@@ -141,27 +150,29 @@ export function TripPanel({
                   </Button>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => setShowDistances((v) => !v)}
-                className="flex items-center gap-2 text-xs text-muted hover:text-primary transition-colors"
-                title={showDistances ? "隱藏景點間距離／時間" : "顯示景點間距離／時間"}
-              >
-                <span>Distances</span>
-                <div
-                  className={cn(
-                    "h-5 w-9 rounded-full p-0.5 transition-colors",
-                    showDistances ? "bg-primary" : "bg-surface-muted"
-                  )}
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowDistances((v) => !v)}
+                  className="flex items-center gap-2 text-xs text-muted hover:text-primary transition-colors"
+                  title={showDistances ? "隱藏景點間距離／時間" : "顯示景點間距離／時間"}
                 >
+                  <span>Distances</span>
                   <div
                     className={cn(
-                      "h-4 w-4 rounded-full bg-primary-foreground transition-transform",
-                      showDistances ? "translate-x-4" : "translate-x-0.5"
+                      "h-5 w-9 rounded-full p-0.5 transition-colors",
+                      showDistances ? "bg-primary" : "bg-surface-muted"
                     )}
-                  />
-                </div>
-              </button>
+                  >
+                    <div
+                      className={cn(
+                        "h-4 w-4 rounded-full bg-primary-foreground transition-transform",
+                        showDistances ? "translate-x-4" : "translate-x-0.5"
+                      )}
+                    />
+                  </div>
+                </button>
+              </div>
             </div>
 
             {days.map((day, dayIdx) => (
@@ -199,6 +210,22 @@ export function TripPanel({
                   ) : (
                     <span className="text-sm text-muted">{day.label}</span>
                   )}
+                  <div className="ml-auto flex shrink-0 items-center">
+                    {onDeleteDay && days.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteDay(day.id);
+                        }}
+                        className="rounded-md p-1.5 text-muted hover:bg-surface-muted hover:text-danger transition-colors"
+                        title="刪除此天"
+                        aria-label="刪除此天"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {day.id === selectedDayId && (
@@ -212,9 +239,18 @@ export function TripPanel({
                           index={index}
                           timeStart={timeItem?.arrivalText}
                           timeEnd={timeItem?.departText}
-                          distanceFromPrev={
-                            showDistances && index > 0 && timeItem
-                              ? `${timeItem.travelMinutesFromPrev} min`
+                          legFromPrev={
+                            index > 0 && timeItem
+                              ? {
+                                  minutes: timeItem.travelMinutesFromPrev,
+                                  mode: timeItem.travelModeFromPrev,
+                                  distance: timeItem.travelDistanceFromPrev ?? "",
+                                }
+                              : undefined
+                          }
+                          onTransportModeChange={
+                            index > 0 && onLegTransportModeChange
+                              ? (mode) => onLegTransportModeChange(index - 1, mode)
                               : undefined
                           }
                           onDragStart={() => onPlaceDragStart?.(index)}
@@ -244,14 +280,47 @@ export function TripPanel({
         )}
 
         {activeTab === "calendar" && (
-          <div className="flex items-center justify-center p-8 text-sm text-muted">
-            Calendar view coming soon
+          <div className="p-4">
+            {days.length === 0 ? (
+              <div className="flex items-center justify-center py-8 text-sm text-muted">
+                No days planned yet. Start chatting to create your itinerary.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {days.map((day, dayIdx) => {
+                  const dayPlaces = day.placeIds
+                    .map((id) => places.find((p) => p.id === id))
+                    .filter((p): p is Place => Boolean(p));
+                  return (
+                    <div key={day.id} className="rounded-card border border-border p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-semibold text-primary">Day {dayIdx + 1}</span>
+                        <span className="text-xs text-muted">{day.label}</span>
+                      </div>
+                      <div className="space-y-1">
+                        {dayPlaces.length === 0 ? (
+                          <p className="text-xs text-muted">No places scheduled</p>
+                        ) : dayPlaces.map((p) => (
+                          <div key={p.id} className="flex items-center gap-2 text-xs text-primary">
+                            <span className="h-1.5 w-1.5 rounded-full bg-primary/40" />
+                            {p.name}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
         {activeTab === "bookings" && (
-          <div className="flex items-center justify-center p-8 text-sm text-muted">
-            No bookings yet
+          <div className="flex flex-col items-center justify-center p-8">
+            <p className="text-sm text-muted mb-2">No bookings yet</p>
+            <p className="text-xs text-muted text-center">
+              Booking integration is in development. You can manage bookings externally for now.
+            </p>
           </div>
         )}
       </div>

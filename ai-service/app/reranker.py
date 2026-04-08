@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ class RecommendationCandidate:
     thumbnail_url: str = ""
     summary: str = ""
     description: str = ""
+    linked_place_names: str = ""
     segments: List[Dict[str, Any]] = field(default_factory=list)
     created_at: Optional[datetime] = None
     raw_score: float = 0.0
@@ -48,6 +50,35 @@ def _freshness_score(created_at: Optional[datetime], now: datetime) -> float:
     return max(0.0, 1.0 - (age_days / 365.0))
 
 
+def _place_name_match_score(
+    place_names: List[str],
+    title: str,
+    summary: str,
+    linked_places: str,
+) -> tuple[float, List[str], str]:
+    """景點名稱為最高優先：標題命中 +5、摘要或關聯景點 +3、皆無則 -2。"""
+    cleaned = [p.strip() for p in place_names if p and len(p.strip()) >= 2]
+    if not cleaned:
+        return 0.0, [], "skipped"
+
+    t = (title or "").lower()
+    s = f"{summary or ''} {linked_places or ''}".lower()
+    matched_title: List[str] = []
+    matched_body: List[str] = []
+    for name in cleaned:
+        n = name.lower()
+        if n in t:
+            matched_title.append(name)
+        elif n in s:
+            matched_body.append(name)
+
+    if matched_title:
+        return 5.0, [f"景點「{matched_title[0]}」出現在影片標題"], "title"
+    if matched_body:
+        return 3.0, [f"景點「{matched_body[0]}」出現在內容或關聯景點"], "summary_or_places"
+    return -2.0, [], "miss"
+
+
 def rerank_candidates(
     candidates: List[RecommendationCandidate],
     keywords: List[str],
@@ -56,16 +87,38 @@ def rerank_candidates(
     pace_pref: str,
     constraints: List[str],
     interaction_scores: Optional[Dict[str, float]] = None,
+    query_text: Optional[str] = None,
+    place_names: Optional[List[str]] = None,
     limit: int = 5,
 ) -> List[ScoredRecommendation]:
     now = datetime.now(timezone.utc)
     results: List[ScoredRecommendation] = []
+    query_lower = (query_text or "").strip().lower()
+    place_name_list = [p.strip() for p in (place_names or []) if p and len(p.strip()) >= 2]
 
     for candidate in candidates:
         score = 1.0
         reasons: List[str] = []
         breakdown: Dict[str, float] = {}
-        concat_text = f"{candidate.title} {candidate.summary} {candidate.description} {candidate.city}"
+        concat_text = (
+            f"{candidate.title} {candidate.summary} {candidate.description} {candidate.city} "
+            f"{candidate.linked_place_names}"
+        )
+
+        place_nm = 0.0
+        if place_name_list:
+            place_nm, place_reasons, kind = _place_name_match_score(
+                place_name_list,
+                candidate.title,
+                candidate.summary,
+                candidate.linked_place_names,
+            )
+            breakdown["place_name_match"] = place_nm
+            score += place_nm
+            if place_reasons:
+                reasons.extend(place_reasons)
+            elif kind == "miss":
+                reasons.append("與你關注的景點名稱在標題與內容中較少直接對應，已降權")
 
         city_score = 0.0
         if candidate.city and candidate.city in preferred_cities:
@@ -73,6 +126,17 @@ def rerank_candidates(
             reasons.append(f"符合你偏好的城市「{candidate.city}」")
         breakdown["city_match"] = city_score
         score += city_score
+
+        query_location_score = 0.0
+        if query_lower and candidate.city:
+            cand_city = candidate.city.strip()
+            if cand_city and cand_city.lower() in query_lower:
+                query_location_score = 2.0
+                reasons.append(f"與你指定的地點「{candidate.city}」相符")
+            else:
+                query_location_score = -0.8
+        breakdown["query_location_match"] = query_location_score
+        score += query_location_score
 
         kw_hits = _text_match_count(keywords, concat_text)
         kw_score = min(2.0, kw_hits * 0.25)
@@ -142,9 +206,6 @@ def rerank_candidates(
         breakdown["behavior_feedback"] = round(behavior_boost, 4)
         score += behavior_boost
 
-        if not reasons:
-            reasons.append("與你的搜尋主題相關")
-
         results.append(ScoredRecommendation(
             candidate=candidate,
             final_score=round(score, 4),
@@ -172,6 +233,7 @@ def build_candidates_from_db_rows(rows: List[Dict[str, Any]]) -> List[Recommenda
                 city=row.get("city") or "",
                 thumbnail_url=f"https://i.ytimg.com/vi/{youtube_id}/mqdefault.jpg" if youtube_id else "",
                 summary=row.get("summary") or "",
+                linked_place_names=row.get("place_names") or "",
                 created_at=row.get("created_at"),
             )
         c = by_video[vid]
@@ -203,13 +265,25 @@ def build_candidates_from_youtube_api(items: List[Dict[str, Any]]) -> List[Recom
     return candidates
 
 
+def _stable_video_id_from_youtube(youtube_id: str) -> int:
+    """Stable positive int for YouTube-only rows so clients can dedupe without colliding on 0."""
+    if not youtube_id:
+        return 0
+    digest = hashlib.sha256(youtube_id.encode("utf-8")).digest()
+    n = int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+    return n if n != 0 else 1
+
+
 def scored_to_response(items: List[ScoredRecommendation]) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     for idx, scored in enumerate(items):
         c = scored.candidate
+        vid = c.video_id
+        if vid is None or vid == 0:
+            vid = _stable_video_id_from_youtube(c.youtube_id or "") if (c.youtube_id or "").strip() else 0
         entry: Dict[str, Any] = {
-            "video_id": c.video_id,
-            "youtube_id": c.youtube_id,
+            "video_id": vid,
+            "youtube_id": c.youtube_id or "",
             "title": c.title,
             "channel": c.channel,
             "duration": c.duration,

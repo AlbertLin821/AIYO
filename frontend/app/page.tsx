@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, Suspense, TouchEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, MouseEvent as ReactMouseEvent, Suspense, TouchEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { AppSidebar } from "@/components/layout/AppSidebar";
@@ -10,15 +10,21 @@ import { TripPanel } from "@/components/trip/TripPanel";
 import { VideoPlayerModal } from "@/components/video/VideoPanel";
 import { Tabs } from "@/components/ui/tabs";
 import { Modal, ModalHeader, ModalBody } from "@/components/ui/modal";
-import { MessageCircle, Search, Heart } from "lucide-react";
+import { MessageCircle, Search, Heart, Map as MapIcon } from "lucide-react";
 import {
   API_BASE_URL,
   getAccessToken,
   getAuthHeaders,
   refreshAccessToken,
   apiFetchWithAuth,
+  clearAccessToken,
+  STORAGE_CHAT_SESSION_ID,
+  STORAGE_ACTIVE_ITINERARY_ID,
+  STORAGE_LAST_AUTH_USER_ID,
 } from "@/lib/api";
+import { normalizeRecommendedVideos } from "@/lib/recommendedVideos";
 
+type ContentTab = "chat" | "search" | "saved" | "itinerary";
 type TransportMode = "drive" | "transit" | "walk" | "bike";
 type BudgetMode = "A" | "B" | "C";
 type AiPanelMode = "A" | "B" | "C";
@@ -72,6 +78,8 @@ type RecommendedSegment = {
   start_sec: number;
   end_sec: number;
   summary?: string;
+  tags?: string[];
+  city?: string;
 };
 
 type RecommendedVideo = {
@@ -201,6 +209,26 @@ type DayPlan = {
   id: string;
   label: string;
   placeIds: string[];
+};
+
+type ChatItineraryPlanSlot = {
+  place_name?: string;
+  segment_id?: number | null;
+  travel_mode?: string;
+  lat?: number | null;
+  lng?: number | null;
+};
+
+type ChatItineraryPlanDay = {
+  day_number?: number;
+  date_label?: string;
+  slots?: ChatItineraryPlanSlot[];
+};
+
+type ChatItineraryPlanPayload = {
+  days?: ChatItineraryPlanDay[];
+  warnings?: string[];
+  feasible?: boolean;
 };
 
 type PlannerState = {
@@ -353,14 +381,11 @@ function remapTransportModes(
 const CHAT_MEMORY_LIMIT = 20;
 const INITIAL_CHAT_MESSAGES: ChatMessage[] = [];
 const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
-const CHAT_SESSION_STORAGE_KEY = "aiyo_chat_session_id";
-const ACTIVE_ITINERARY_STORAGE_KEY = "aiyo_active_itinerary_id";
-
 function getStoredChatSessionId(): string {
   if (typeof window === "undefined") {
     return "";
   }
-  const stored = window.localStorage.getItem(CHAT_SESSION_STORAGE_KEY);
+  const stored = window.localStorage.getItem(STORAGE_CHAT_SESSION_ID);
   return (stored && stored.trim()) ? stored.trim() : "";
 }
 
@@ -368,14 +393,14 @@ function persistChatSessionId(sessionId: string): void {
   if (typeof window === "undefined" || !sessionId.trim()) {
     return;
   }
-  window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, sessionId.trim());
+  window.localStorage.setItem(STORAGE_CHAT_SESSION_ID, sessionId.trim());
 }
 
 function getStoredActiveItineraryId(): number | null {
   if (typeof window === "undefined") {
     return null;
   }
-  const raw = window.localStorage.getItem(ACTIVE_ITINERARY_STORAGE_KEY);
+  const raw = window.localStorage.getItem(STORAGE_ACTIVE_ITINERARY_ID);
   if (!raw) return null;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -385,7 +410,7 @@ function persistActiveItineraryId(id: number): void {
   if (typeof window === "undefined" || !Number.isFinite(id) || id <= 0) {
     return;
   }
-  window.localStorage.setItem(ACTIVE_ITINERARY_STORAGE_KEY, String(id));
+  window.localStorage.setItem(STORAGE_ACTIVE_ITINERARY_ID, String(id));
 }
 
 function createSessionId(): string {
@@ -395,11 +420,51 @@ function createSessionId(): string {
   return `session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+async function ensureGoogleMapsLibraries(googleApi: typeof google): Promise<typeof google> {
+  const mapsNs = googleApi.maps;
+  if (typeof mapsNs.importLibrary === "function") {
+    const mapsLib = (await mapsNs.importLibrary("maps")) as { Map?: typeof google.maps.Map };
+    await mapsNs.importLibrary("places");
+    await mapsNs.importLibrary("routes");
+    if (typeof mapsLib.Map === "function" && typeof mapsNs.Map !== "function") {
+      (mapsNs as unknown as { Map: typeof google.maps.Map }).Map = mapsLib.Map;
+    }
+  }
+  if (typeof mapsNs.Map !== "function") {
+    throw new Error("Google Maps 類別尚未就緒。");
+  }
+  return googleApi;
+}
+
+function buildGoogleMapInstance(
+  googleApi: typeof google,
+  container: HTMLDivElement,
+  cloudMapId: string
+): google.maps.Map {
+  const baseOptions: google.maps.MapOptions = {
+    center: { lat: 23.0, lng: 120.2 },
+    zoom: 10,
+    mapTypeId: "roadmap",
+    gestureHandling: "greedy",
+    streetViewControl: true,
+    fullscreenControl: false
+  };
+  if (!cloudMapId) {
+    return new googleApi.maps.Map(container, baseOptions);
+  }
+  try {
+    return new googleApi.maps.Map(container, { ...baseOptions, mapId: cloudMapId });
+  } catch {
+    // mapId 設定無效時自動降級，避免整個地圖初始化失敗。
+    return new googleApi.maps.Map(container, baseOptions);
+  }
+}
+
 function loadGoogleMapsApi(): Promise<typeof google> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("Google Maps 僅能在瀏覽器環境使用。"));
   }
-  if (window.google?.maps) {
+  if (window.google?.maps?.Map) {
     return Promise.resolve(window.google);
   }
   if (window.__googleMapsScriptLoadingPromise) {
@@ -409,23 +474,35 @@ function loadGoogleMapsApi(): Promise<typeof google> {
     return Promise.reject(new Error("缺少 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY。"));
   }
 
-  window.__googleMapsScriptLoadingPromise = new Promise<typeof google>((resolve, reject) => {
+  const loadingPromise = new Promise<typeof google>((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&libraries=places`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&libraries=places,routes&loading=async`;
     script.async = true;
     script.defer = true;
     script.onload = () => {
-      if (window.google?.maps) {
-        resolve(window.google);
-        return;
-      }
-      reject(new Error("Google Maps 載入失敗。"));
+      void (async () => {
+        try {
+          const g = window.google;
+          if (!g?.maps) {
+            reject(new Error("Google Maps 載入失敗。"));
+            return;
+          }
+          const ready = await ensureGoogleMapsLibraries(g);
+          resolve(ready);
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      })();
     };
     script.onerror = () => reject(new Error("Google Maps 腳本載入失敗。"));
     document.head.appendChild(script);
   });
 
-  return window.__googleMapsScriptLoadingPromise;
+  window.__googleMapsScriptLoadingPromise = loadingPromise;
+  void loadingPromise.catch(() => {
+    window.__googleMapsScriptLoadingPromise = undefined;
+  });
+  return loadingPromise;
 }
 
 function buildWsUrl(token: string): string {
@@ -463,6 +540,45 @@ function trimChatMessages(messages: ChatMessage[], limit: number): ChatMessage[]
   return messages.slice(messages.length - limit);
 }
 
+/** Parse one SSE event block (may contain multiple `data:` lines joined per SSE spec). */
+function parseSseEventBlock(block: string): Record<string, unknown> | null {
+  const lines = block.split("\n").filter((l) => l.length > 0);
+  const dataLines: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  }
+  if (dataLines.length === 0) {
+    return null;
+  }
+  const joined = dataLines.join("\n");
+  try {
+    return JSON.parse(joined) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function parseTrailingSsePayload(buffer: string): Record<string, unknown> | null {
+  const t = buffer.trim();
+  if (!t) {
+    return null;
+  }
+  const fromBlock = parseSseEventBlock(t);
+  if (fromBlock) {
+    return fromBlock;
+  }
+  if (t.startsWith("{")) {
+    try {
+      return JSON.parse(t) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function escapeHtml(input: string): string {
   return input
     .replaceAll("&", "&amp;")
@@ -483,6 +599,10 @@ function HomePageInner() {
   const [mapSearchResults, setMapSearchResults] = useState<MapSearchResult[]>([]);
   const [mapSearchMode, setMapSearchMode] = useState<"center" | "global">("center");
   const [mapSearchRadiusKm, setMapSearchRadiusKm] = useState(25);
+  const mapSearchRadiusKmRef = useRef(mapSearchRadiusKm);
+  const mapSearchModeRef = useRef(mapSearchMode);
+  mapSearchRadiusKmRef.current = mapSearchRadiusKm;
+  mapSearchModeRef.current = mapSearchMode;
   const [locatingCurrentPosition, setLocatingCurrentPosition] = useState(false);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dayDragIndex, setDayDragIndex] = useState<number | null>(null);
@@ -530,6 +650,7 @@ function HomePageInner() {
   const [memoryReviewing, setMemoryReviewing] = useState(false);
   const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const [recommendedVideos, setRecommendedVideos] = useState<RecommendedVideo[]>([]);
+  const [lastRecommendationQuery, setLastRecommendationQuery] = useState("");
   const [optimizingItinerary, setOptimizingItinerary] = useState(false);
   const [optimizationResult, setOptimizationResult] = useState<ItineraryOptimizationResult | null>(null);
   const [savedItineraries, setSavedItineraries] = useState<SavedItinerarySummary[]>([]);
@@ -538,6 +659,14 @@ function HomePageInner() {
   const [activeItineraryId, setActiveItineraryId] = useState<number | null>(null);
   const [playerVideo, setPlayerVideo] = useState<RecommendedVideo | null>(null);
   const [playerStartSec, setPlayerStartSec] = useState(0);
+  const [primaryTab, setPrimaryTab] = useState<ContentTab>("chat");
+  const [secondaryTab, setSecondaryTab] = useState<ContentTab | null>(null);
+  const [tripPanelTab, setTripPanelTab] = useState("itinerary");
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const [splitDragging, setSplitDragging] = useState(false);
+  const splitDragRef = useRef<{ startX: number; startRatio: number; width: number } | null>(null);
+  const centerSplitContainerRef = useRef<HTMLDivElement>(null);
+  const [searchAddMenuResultId, setSearchAddMenuResultId] = useState<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -551,8 +680,7 @@ function HomePageInner() {
   const mapClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const markerRefs = useRef<Map<string, google.maps.Marker>>(new Map());
   const searchResultMarkersRef = useRef<google.maps.Marker[]>([]);
-  const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
-  const directionsServiceRef = useRef<google.maps.DirectionsService | null>(null);
+  const routePolylinesRef = useRef<google.maps.Polyline[]>([]);
   const placesServiceRef = useRef<google.maps.places.PlacesService | null>(null);
   const searchBoxRef = useRef<google.maps.places.SearchBox | null>(null);
   const searchBoxPlacesChangedListenerRef = useRef<google.maps.MapsEventListener | null>(null);
@@ -560,6 +688,11 @@ function HomePageInner() {
   const streetViewServiceRef = useRef<google.maps.StreetViewService | null>(null);
   const locationSyncOnceRef = useRef(false);
   const itineraryTouchStartXRef = useRef<number | null>(null);
+
+  const mapColumnVisible = useMemo(
+    () => (primaryTab === "search" && secondaryTab === null) || secondaryTab === "search",
+    [primaryTab, secondaryTab]
+  );
 
   useEffect(() => {
     if (!authReady) {
@@ -653,11 +786,15 @@ function HomePageInner() {
     return selectedDayPlaces.map((place, index) => {
       let travelMinutes = 0;
       let mode: TransportMode = "drive";
+      let travelDistanceStr = "";
       if (index > 0) {
         const prev = selectedDayPlaces[index - 1];
         const pairKey = `${selectedDay.id}:${index - 1}-${index}`;
         mode = state.transportModes[pairKey] ?? "drive";
-        travelMinutes = estimateTransport(mode, mapDistanceKm(prev, place)).minutes;
+        const distKm = mapDistanceKm(prev, place);
+        const est = estimateTransport(mode, distKm);
+        travelMinutes = est.minutes;
+        travelDistanceStr = est.distance;
         cursorMinutes += travelMinutes;
       }
       const arrivalMinutes = cursorMinutes;
@@ -671,7 +808,8 @@ function HomePageInner() {
         departText: fmt(departMinutes),
         stayMinutes: place.stayMinutes,
         travelMinutesFromPrev: travelMinutes,
-        travelModeFromPrev: mode
+        travelModeFromPrev: mode,
+        travelDistanceFromPrev: travelDistanceStr
       };
     });
   }, [selectedDay.id, selectedDayPlaces, state.transportModes]);
@@ -695,6 +833,16 @@ function HomePageInner() {
       panorama.setPosition(data.location.latLng);
       panorama.setPov({ heading: 0, pitch: 0 });
       panorama.setVisible(true);
+    });
+  }
+
+  function handleLegTransportModeChange(legIndex: number, mode: TransportMode) {
+    commit((draft) => {
+      const day = draft.days.find((item) => item.id === draft.selectedDayId);
+      if (!day || day.placeIds.length < 2) {
+        return;
+      }
+      draft.transportModes[`${day.id}:${legIndex}-${legIndex + 1}`] = mode;
     });
   }
 
@@ -735,6 +883,9 @@ function HomePageInner() {
     });
     map.fitBounds(bounds, 80);
   }
+
+  const renderSearchResultsOnMapRef = useRef(renderSearchResultsOnMap);
+  renderSearchResultsOnMapRef.current = renderSearchResultsOnMap;
 
   function normalizePlaceResults(placeResults: google.maps.places.PlaceResult[]): MapSearchResult[] {
     const merged = new Map<string, MapSearchResult>();
@@ -886,9 +1037,8 @@ function HomePageInner() {
     return Array.from(merged.values());
   }
 
-  async function onMapSearchSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const query = searchText.trim();
+  async function runMapSearchQuery(rawQuery: string): Promise<void> {
+    const query = rawQuery.trim();
     if (!query) {
       return;
     }
@@ -1111,6 +1261,33 @@ function HomePageInner() {
     renderSearchResultsOnMap(finalResults, map, googleApi);
   }
 
+  async function onMapSearchSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const q = searchText.trim();
+    if (!q) {
+      return;
+    }
+    await runMapSearchQuery(q);
+  }
+
+  function focusPlaceByNameFromVideo(name: string) {
+    const q = name.trim();
+    if (!q) {
+      return;
+    }
+    setSearchText(q);
+    if (!mapColumnVisible) {
+      if (primaryTab === "search" && secondaryTab === "itinerary") {
+        setSecondaryTab(null);
+      } else if (primaryTab === "itinerary" && secondaryTab === null) {
+        setSecondaryTab("search");
+      } else if (primaryTab !== "search") {
+        setSecondaryTab("search");
+      }
+    }
+    void runMapSearchQuery(q);
+  }
+
   function locateCurrentPosition() {
     const map = googleMapRef.current;
     if (!map) {
@@ -1166,7 +1343,7 @@ function HomePageInner() {
   }
 
   useEffect(() => {
-    if (!authReady) {
+    if (!authReady || !mapColumnVisible) {
       return;
     }
     if (!mapContainerRef.current) {
@@ -1175,38 +1352,42 @@ function HomePageInner() {
     const markers = markerRefs.current;
     let alive = true;
     void (async () => {
-      try {
-        setMapError(null);
+      async function initOnce(): Promise<void> {
         const googleApi = await loadGoogleMapsApi();
         if (!alive || !mapContainerRef.current) {
           return;
         }
-        const map = new googleApi.maps.Map(mapContainerRef.current, {
-          center: { lat: 23.000, lng: 120.200 },
-          zoom: 10,
-          mapTypeId: "roadmap",
-          gestureHandling: "greedy",
-          streetViewControl: true,
-          fullscreenControl: false
-        });
+        const cloudMapId = (process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || "").trim();
+        const map = buildGoogleMapInstance(googleApi, mapContainerRef.current, cloudMapId);
         googleMapRef.current = map;
         mapClickListenerRef.current = map.addListener("click", () => setSelectedPlaceId(null));
         setMapReady(true);
+      }
+      try {
+        setMapError(null);
+        await initOnce();
       } catch (error) {
         if (!alive) {
           return;
         }
-        const text = error instanceof Error ? error.message : "Google Maps 初始化失敗。";
-        setMapError(text);
+        window.__googleMapsScriptLoadingPromise = undefined;
+        try {
+          await initOnce();
+        } catch (err2) {
+          if (!alive) {
+            return;
+          }
+          const text = err2 instanceof Error ? err2.message : "Google Maps 初始化失敗。";
+          setMapError(text);
+        }
       }
     })();
     return () => {
       alive = false;
       mapClickListenerRef.current?.remove();
       mapClickListenerRef.current = null;
-      directionsRendererRef.current?.setMap(null);
-      directionsRendererRef.current = null;
-      directionsServiceRef.current = null;
+      routePolylinesRef.current.forEach((p) => p.setMap(null));
+      routePolylinesRef.current = [];
       markers.forEach((marker) => marker.setMap(null));
       markers.clear();
       clearSearchResultMarkers();
@@ -1214,7 +1395,23 @@ function HomePageInner() {
       googleMapRef.current = null;
       setMapReady(false);
     };
-  }, [authReady]);
+  }, [authReady, mapColumnVisible]);
+
+  useEffect(() => {
+    const map = googleMapRef.current;
+    const g = window.google;
+    if (!mapReady || !mapColumnVisible || !map || !g?.maps?.event) {
+      return;
+    }
+    const id = window.setTimeout(() => {
+      g.maps.event.trigger(map, "resize");
+      const center = map.getCenter();
+      if (center) {
+        map.setCenter(center);
+      }
+    }, 50);
+    return () => window.clearTimeout(id);
+  }, [mapReady, mapColumnVisible]);
 
   useEffect(() => {
     const map = googleMapRef.current;
@@ -1258,45 +1455,79 @@ function HomePageInner() {
     if (!map || !googleApi?.maps) {
       return;
     }
-    if (!directionsRendererRef.current) {
-      directionsRendererRef.current = new googleApi.maps.DirectionsRenderer({
-        suppressMarkers: false,
-        preserveViewport: true,
-        polylineOptions: { strokeColor: "#2563eb", strokeWeight: 5, strokeOpacity: 0.75 }
-      });
-      directionsRendererRef.current.setMap(map);
-    }
-    if (!directionsServiceRef.current) {
-      directionsServiceRef.current = new googleApi.maps.DirectionsService();
-    }
-    if (selectedDayPlaces.length < 2) {
-      directionsRendererRef.current.setMap(null);
-      return;
-    }
-    directionsRendererRef.current.setMap(map);
 
-    const firstLegMode = (state.transportModes[`${selectedDay.id}:0-1`] ?? "drive") as TransportMode;
-    const origin = selectedDayPlaces[0];
-    const destination = selectedDayPlaces[selectedDayPlaces.length - 1];
-    const waypoints = selectedDayPlaces.slice(1, -1).map((place) => ({
-      location: new googleApi.maps.LatLng(place.lat, place.lng),
-      stopover: true
-    }));
-    const request: google.maps.DirectionsRequest = {
-      origin: new googleApi.maps.LatLng(origin.lat, origin.lng),
-      destination: new googleApi.maps.LatLng(destination.lat, destination.lng),
-      waypoints,
-      optimizeWaypoints: false,
-      travelMode: toGoogleTravelMode(firstLegMode)
+    const clearRoutePolylines = () => {
+      routePolylinesRef.current.forEach((p) => p.setMap(null));
+      routePolylinesRef.current = [];
     };
 
-    directionsServiceRef.current.route(request, (result, status) => {
-      if (status === googleApi.maps.DirectionsStatus.OK && result) {
-        directionsRendererRef.current?.setDirections(result);
-      } else {
-        directionsRendererRef.current?.setMap(null);
+    if (selectedDayPlaces.length < 2) {
+      clearRoutePolylines();
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const routesLib = (await googleApi.maps.importLibrary("routes")) as {
+          Route?: {
+            computeRoutes: (req: unknown) => Promise<{
+              routes?: Array<{ createPolylines: () => google.maps.Polyline[] }>;
+            }>;
+          };
+        };
+        const Route = routesLib.Route;
+        if (!Route || typeof Route.computeRoutes !== "function") {
+          clearRoutePolylines();
+          return;
+        }
+
+        const origin = selectedDayPlaces[0];
+        const destination = selectedDayPlaces[selectedDayPlaces.length - 1];
+        const mids = selectedDayPlaces.slice(1, -1);
+        const travelMode = toGoogleTravelMode(
+          state.transportModes[`${selectedDay.id}:0-1`] ?? ("drive" as TransportMode)
+        );
+
+        const request: Record<string, unknown> = {
+          origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
+          destination: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } },
+          travelMode,
+          optimizeWaypointOrder: false,
+          fields: ["route.polyline", "route.path"],
+        };
+        if (mids.length > 0) {
+          request.intermediates = mids.map((place) => ({
+            location: { latLng: { latitude: place.lat, longitude: place.lng } },
+          }));
+        }
+
+        const result = await Route.computeRoutes(request);
+        if (cancelled) {
+          return;
+        }
+        clearRoutePolylines();
+        const routes = result.routes;
+        if (!routes || routes.length === 0) {
+          return;
+        }
+        const polylines = routes[0].createPolylines();
+        polylines.forEach((poly) => {
+          poly.setOptions({ strokeColor: "#1B4965", strokeWeight: 5, strokeOpacity: 0.75 });
+          poly.setMap(map);
+        });
+        routePolylinesRef.current = polylines;
+      } catch {
+        if (!cancelled) {
+          clearRoutePolylines();
+        }
       }
-    });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedDay.id, selectedDayPlaces, state.transportModes, mapReady]);
 
   useEffect(() => {
@@ -1334,9 +1565,9 @@ function HomePageInner() {
           placesServiceRef.current = placesService;
           const broadQuery = (placeResults[0]?.name?.trim() || inputQuery.split(",")[0]?.trim() || inputQuery).trim();
           const mapCenter = map.getCenter() ?? null;
-          const radiusMeters = Math.max(1000, Math.min(50000, Math.round(mapSearchRadiusKm * 1000)));
+          const radiusMeters = Math.max(1000, Math.min(50000, Math.round(mapSearchRadiusKmRef.current * 1000)));
           const request: google.maps.places.TextSearchRequest =
-            mapSearchMode === "center" && mapCenter
+            mapSearchModeRef.current === "center" && mapCenter
               ? { query: broadQuery, location: mapCenter, radius: radiusMeters }
               : { query: broadQuery };
 
@@ -1367,7 +1598,7 @@ function HomePageInner() {
         setSelectedPlaceId(null);
         setMapSearchResults(results);
         setSearchText(input.value);
-        renderSearchResultsOnMap(results, map, googleApi);
+        renderSearchResultsOnMapRef.current(results, map, googleApi);
       })();
     });
 
@@ -1433,7 +1664,7 @@ function HomePageInner() {
       try {
         const response = await apiFetchWithAuth(`${API_BASE_URL}/api/auth/me`);
         if (!response.ok) {
-          window.localStorage.removeItem("aiyo_token");
+          clearAccessToken();
           router.replace("/login");
           return;
         }
@@ -1442,18 +1673,51 @@ function HomePageInner() {
           return;
         }
         if (data.user?.id) {
-          const stored = getStoredChatSessionId();
-          if (!stored) {
-            const defaultId = `user-${data.user.id}-default`;
+          const uid = data.user.id;
+          const lastAuth =
+            typeof window !== "undefined"
+              ? window.localStorage.getItem(STORAGE_LAST_AUTH_USER_ID)
+              : null;
+          const switchedUser =
+            lastAuth !== null && lastAuth !== "" && lastAuth !== String(uid);
+          if (switchedUser) {
+            const defaultId = `user-${uid}-default`;
             persistChatSessionId(defaultId);
             setChatSessionId(defaultId);
+            setChatMessages(INITIAL_CHAT_MESSAGES);
+            setRecommendedVideos([]);
+            setLastRecommendationQuery("");
+            setToolCallSummaries([]);
+            if (typeof window !== "undefined") {
+              window.localStorage.removeItem(STORAGE_ACTIVE_ITINERARY_ID);
+            }
+            try {
+              Object.keys(sessionStorage).forEach((key) => {
+                if (key.startsWith("aiyo_recommended_")) {
+                  sessionStorage.removeItem(key);
+                }
+              });
+            } catch {
+              /* ignore */
+            }
           } else {
-            setChatSessionId(stored);
+            const stored = getStoredChatSessionId();
+            if (!stored) {
+              const defaultId = `user-${uid}-default`;
+              persistChatSessionId(defaultId);
+              setChatSessionId(defaultId);
+            } else {
+              setChatSessionId(stored);
+            }
+          }
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem(STORAGE_LAST_AUTH_USER_ID, String(uid));
           }
         }
         setAuthEmail(data.user?.email ?? "");
         setAuthReady(true);
       } catch {
+        clearAccessToken();
         if (active) {
           router.replace("/login");
         }
@@ -1462,7 +1726,8 @@ function HomePageInner() {
     return () => {
       active = false;
     };
-  }, [router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!authReady) {
@@ -1527,6 +1792,17 @@ function HomePageInner() {
           })
           .filter((item) => item.content.trim().length > 0);
         setChatMessages(rows.length > 0 ? rows : INITIAL_CHAT_MESSAGES);
+        try {
+          const raw = sessionStorage.getItem(`aiyo_recommended_${chatSessionId}`);
+          if (raw) {
+            const parsed = JSON.parse(raw) as RecommendedVideo[];
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setRecommendedVideos(normalizeRecommendedVideos(parsed));
+            }
+          }
+        } catch {
+          /* ignore */
+        }
       } catch {
         // Ignore history load failures.
       }
@@ -1752,7 +2028,7 @@ function HomePageInner() {
 
   function selectDay(dayId: string) {
     commit((draft) => {
-      draft.selectedDayId = dayId;
+      draft.selectedDayId = draft.selectedDayId === dayId ? "" : dayId;
     });
   }
 
@@ -1943,9 +2219,8 @@ function HomePageInner() {
     selectDay(state.days[targetIndex].id);
   }
 
-  function onSubmitChat(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const value = chatInput.trim();
+  function submitChatMessage(rawValue: string) {
+    const value = rawValue.trim();
     if (!value || chatLoading) {
       return;
     }
@@ -1965,9 +2240,48 @@ function HomePageInner() {
     streamingViaSseRef.current = true;
 
     void (async () => {
+      let gotRecommendedVideos = false;
+      let gotItineraryPlan = false;
+      const savedItineraryReplyRe = /(儲存|保存).*(行程)|(個人行程安排)/;
+
+      async function tryLoadItineraryFromSavedReply(replyText: string): Promise<void> {
+        if (gotItineraryPlan || !savedItineraryReplyRe.test(replyText)) {
+          return;
+        }
+        if (activeItineraryId) {
+          await loadSavedItinerary(activeItineraryId);
+          setSecondaryTab("itinerary");
+          gotItineraryPlan = true;
+          return;
+        }
+        const listRes = await apiFetchWithAuth(`${API_BASE_URL}/api/itinerary?limit=1`);
+        if (!listRes.ok) {
+          return;
+        }
+        const listData = (await listRes.json().catch(() => ({}))) as {
+          items?: Array<{ id?: number; updated_at?: string }>;
+        };
+        const latest = Array.isArray(listData.items) ? listData.items[0] : undefined;
+        const latestId = Number(latest?.id || 0);
+        if (Number.isFinite(latestId) && latestId > 0) {
+          await loadSavedItinerary(latestId);
+          setSecondaryTab("itinerary");
+          gotItineraryPlan = true;
+        }
+      }
+
       try {
         const resolvedChatCity =
           aiSettings.current_region?.trim() || aiSettings.weather_default_region?.trim() || undefined;
+        const itineraryPlaces: string[] = [];
+        for (const day of state.days) {
+          for (const placeId of day.placeIds) {
+            const p = getPlaceById(placeId);
+            if (p?.name && !itineraryPlaces.includes(p.name)) {
+              itineraryPlaces.push(p.name);
+            }
+          }
+        }
         const response = await apiFetchWithAuth(`${API_BASE_URL}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1976,7 +2290,9 @@ function HomePageInner() {
             message: value,
             messages: nextMessages,
             model: selectedModel || undefined,
-            city: resolvedChatCity
+            city: resolvedChatCity,
+            stream: false,
+            itinerary_places: itineraryPlaces.length > 0 ? itineraryPlaces : undefined,
           })
         });
 
@@ -1993,6 +2309,55 @@ function HomePageInner() {
           throw new Error(errorText);
         }
 
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const data = (await response.json()) as {
+            reply?: string;
+            recommended_videos?: RecommendedVideo[];
+            tool_calls_summary?: ToolCallSummary[];
+            itinerary_plan?: ChatItineraryPlanPayload;
+            fallback?: boolean;
+          };
+          const replyText = typeof data.reply === "string" ? data.reply : "";
+          setChatMessages((prev) =>
+            trimChatMessages(
+              prev.map((item, index) =>
+                index === assistantIndex ? { ...item, content: replyText } : item
+              ),
+              CHAT_MEMORY_LIMIT + 1
+            )
+          );
+          if (data.fallback) {
+            setChatDegraded(true);
+          }
+          if (data.recommended_videos && data.recommended_videos.length > 0) {
+            const list = normalizeRecommendedVideos(data.recommended_videos);
+            setRecommendedVideos(list);
+            setLastRecommendationQuery(value);
+            gotRecommendedVideos = list.length > 0;
+            try {
+              sessionStorage.setItem(`aiyo_recommended_${chatSessionId}`, JSON.stringify(list));
+            } catch {
+              /* ignore */
+            }
+          }
+          if (data.tool_calls_summary && data.tool_calls_summary.length > 0) {
+            setToolCallSummaries(data.tool_calls_summary.slice(0, 8));
+          }
+          if (data.itinerary_plan && data.itinerary_plan.days?.length) {
+            applyItineraryPlanFromChat(data.itinerary_plan);
+            gotItineraryPlan = true;
+          }
+          if (!gotRecommendedVideos) {
+            const existingIds = recommendedVideos.map((item) => item.youtube_id).filter(Boolean);
+            await loadMoreRecommendations(existingIds, value);
+          }
+          if (!gotItineraryPlan) {
+            await tryLoadItineraryFromSavedReply(replyText);
+          }
+          return;
+        }
+
         if (!response.body) {
           throw new Error("目前無法取得串流回應。");
         }
@@ -2001,104 +2366,112 @@ function HomePageInner() {
         const decoder = new TextDecoder();
         let buffered = "";
 
-        while (true) {
-          const { value: chunk, done } = await reader.read();
-          if (done) {
-            break;
-          }
-          buffered += decoder.decode(chunk, { stream: true });
-          const lines = buffered.split("\n");
-          buffered = lines.pop() ?? "";
+        type ChatStreamPayload = {
+          token?: string;
+          done?: boolean;
+          error?: string;
+          recommended_videos?: RecommendedVideo[];
+          fallback?: boolean;
+          tool_calls_summary?: ToolCallSummary[];
+          itinerary_plan?: ChatItineraryPlanPayload;
+        };
 
-          for (const line of lines) {
-            if (!line.startsWith("data:")) {
-              continue;
-            }
-            const payloadText = line.slice(5).trim();
-            if (!payloadText) {
-              continue;
-            }
+        function applyChatStreamPayload(payload: ChatStreamPayload): void {
+          if (payload.error) {
+            throw new Error(payload.error);
+          }
+          if (payload.token) {
+            setChatMessages((prev) =>
+              trimChatMessages(
+                prev.map((item, index) =>
+                  index === assistantIndex ? { ...item, content: `${item.content}${payload.token}` } : item
+                ),
+                CHAT_MEMORY_LIMIT + 1
+              )
+            );
+          }
+          if (payload.recommended_videos) {
+            const list = normalizeRecommendedVideos(payload.recommended_videos);
+            setRecommendedVideos(list);
+            setLastRecommendationQuery(value);
+            gotRecommendedVideos = list.length > 0;
             try {
-              const payload = JSON.parse(payloadText) as {
-                token?: string;
-                done?: boolean;
-                error?: string;
-                recommended_videos?: RecommendedVideo[];
-                fallback?: boolean;
-                tool_calls_summary?: ToolCallSummary[];
-              };
-              if (payload.error) {
-                throw new Error(payload.error);
-              }
-              if (payload.token) {
-                setChatMessages((prev) =>
-                  trimChatMessages(
-                    prev.map((item, index) =>
-                      index === assistantIndex ? { ...item, content: `${item.content}${payload.token}` } : item
-                    ),
-                    CHAT_MEMORY_LIMIT + 1
-                  )
-                );
-              }
-              if (payload.recommended_videos) {
-                setRecommendedVideos(payload.recommended_videos.slice(0, 5));
-              }
-              if (payload.fallback) {
-                setChatDegraded(true);
-              }
-              if (payload.done && payload.tool_calls_summary) {
-                setToolCallSummaries(payload.tool_calls_summary.slice(0, 8));
-              }
-            } catch (error) {
-              if (error instanceof Error) {
-                throw error;
-              }
-              throw new Error("回應解析失敗。");
+              sessionStorage.setItem(`aiyo_recommended_${chatSessionId}`, JSON.stringify(list));
+            } catch {
+              /* ignore */
             }
+          }
+          if (payload.fallback) {
+            setChatDegraded(true);
+          }
+          if (payload.done && payload.tool_calls_summary) {
+            setToolCallSummaries(payload.tool_calls_summary.slice(0, 8));
+          }
+          if (payload.itinerary_plan && payload.itinerary_plan.days?.length) {
+            applyItineraryPlanFromChat(payload.itinerary_plan);
+            gotItineraryPlan = true;
           }
         }
 
-        if (buffered.startsWith("data:")) {
-          const payloadText = buffered.slice(5).trim();
-          if (payloadText) {
-            const payload = JSON.parse(payloadText) as {
-              token?: string;
-              recommended_videos?: RecommendedVideo[];
-              fallback?: boolean;
-              done?: boolean;
-              tool_calls_summary?: ToolCallSummary[];
-            };
-            if (payload.token) {
-              setChatMessages((prev) =>
-                trimChatMessages(
-                  prev.map((item, index) =>
-                    index === assistantIndex ? { ...item, content: `${item.content}${payload.token}` } : item
-                  ),
-                  CHAT_MEMORY_LIMIT + 1
-                )
-              );
+        /** 以 `\n\n` 切 SSE event；不完整區塊留在緩衝，迴圈結束後再以 parseTrailingSsePayload 補解析。 */
+        function consumeSseBlocks(text: string): string {
+          let rest = text;
+          for (;;) {
+            const ix = rest.indexOf("\n\n");
+            if (ix === -1) {
+              break;
             }
-            if (payload.recommended_videos) {
-              setRecommendedVideos(payload.recommended_videos.slice(0, 5));
-            }
-            if (payload.fallback) {
-              setChatDegraded(true);
-            }
-            if (payload.done && payload.tool_calls_summary) {
-              setToolCallSummaries(payload.tool_calls_summary.slice(0, 8));
+            const block = rest.slice(0, ix);
+            rest = rest.slice(ix + 2);
+            const obj = parseSseEventBlock(block);
+            if (obj) {
+              applyChatStreamPayload(obj as ChatStreamPayload);
             }
           }
+          return rest;
+        }
+
+        while (true) {
+          const { value: chunk, done } = await reader.read();
+          buffered += decoder.decode(chunk, { stream: !done });
+          buffered = consumeSseBlocks(buffered);
+          if (done) {
+            break;
+          }
+        }
+
+        const tailObj = parseTrailingSsePayload(buffered);
+        if (tailObj) {
+          applyChatStreamPayload(tailObj as ChatStreamPayload);
+        }
+        if (!gotRecommendedVideos) {
+          const existingIds = recommendedVideos.map((item) => item.youtube_id).filter(Boolean);
+          await loadMoreRecommendations(existingIds, value);
+        }
+        if (!gotItineraryPlan) {
+          const finalReply = ((chatMessages[assistantIndex]?.content as string) || "").trim();
+          if (finalReply) {
+            await tryLoadItineraryFromSavedReply(finalReply);
+          }
+        }
+        if (!gotItineraryPlan) {
+          setSecondaryTab("itinerary");
         }
       } catch (error) {
         const text = error instanceof Error ? error.message : "聊天服務暫時無法使用，請稍後再試。";
         setChatError(text);
         setChatMessages((prev) =>
           trimChatMessages(
-            prev.map((item, index) =>
-              index === assistantIndex
-                ? { ...item, content: "目前無法取得 AI 回應。你可以稍後再試，或檢查模型服務是否正常。" }
-                : item
-            ),
+            prev.map((item, index) => {
+              if (index !== assistantIndex) {
+                return item;
+              }
+              const existing = (item.content || "").trim();
+              const suffix = existing
+                ? `\n\n（回應中斷：${text}）`
+                : `目前無法取得完整 AI 回應（${text}）。你可以稍後再試，或檢查模型服務是否正常。`;
+              return { ...item, content: existing ? `${item.content}${suffix}` : suffix };
+            }),
             CHAT_MEMORY_LIMIT + 1
           )
         );
@@ -2108,6 +2481,20 @@ function HomePageInner() {
         void runAiMemoryReview();
       }
     })();
+  }
+
+  function onSubmitChat(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    submitChatMessage(chatInput);
+  }
+
+  function handleQuickReplyClick(options: string[]) {
+    if (options.length === 0) {
+      return;
+    }
+    const text =
+      options.length === 1 ? options[0] : options.map((o) => o.trim()).filter(Boolean).join("、");
+    submitChatMessage(text);
   }
 
   async function trackRecommendationEvent(
@@ -2136,6 +2523,50 @@ function HomePageInner() {
       });
     } catch {
       // Fire-and-forget; do not interrupt user flow.
+    }
+  }
+
+  async function loadMoreRecommendations(
+    excludeYoutubeIds: string[],
+    lastQuery: string,
+  ): Promise<RecommendedVideo[]> {
+    if (!authReady) return [];
+    const city = aiSettings.current_region?.trim() || aiSettings.weather_default_region?.trim() || undefined;
+    try {
+      const res = await apiFetchWithAuth(`${API_BASE_URL}/api/recommendation/more`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          exclude_youtube_ids: excludeYoutubeIds,
+          last_query: lastQuery || "旅遊",
+          city,
+          limit: 5,
+        }),
+      });
+      const data = (await res.json()) as { recommended_videos?: RecommendedVideo[] };
+      const more = normalizeRecommendedVideos(data.recommended_videos ?? []);
+      if (more.length > 0) {
+        setRecommendedVideos((prev) => {
+          const seen = new Set(prev.map((p) => p.youtube_id));
+          const merged = [...prev];
+          for (const v of more) {
+            if (!seen.has(v.youtube_id)) {
+              seen.add(v.youtube_id);
+              merged.push(v);
+            }
+          }
+          const next = merged;
+          try {
+            sessionStorage.setItem(`aiyo_recommended_${chatSessionId}`, JSON.stringify(next));
+          } catch {
+            /* ignore */
+          }
+          return next;
+        });
+      }
+      return more;
+    } catch {
+      return [];
     }
   }
 
@@ -2178,6 +2609,88 @@ function HomePageInner() {
     } catch {
       // Ignore list fetch errors to avoid blocking UI.
     }
+  }
+
+  function upsertChatPlanPlace(
+    name: string,
+    uniqueSeed: string,
+    lat?: number | null,
+    lng?: number | null
+  ): string {
+    const normalized = name.trim().toLowerCase();
+    const existed = places.find((item) => item.name.trim().toLowerCase() === normalized);
+    if (existed) {
+      return existed.id;
+    }
+    const placeId = `chat-${uniqueSeed}`;
+    const safeLat = typeof lat === "number" && !Number.isNaN(lat) ? lat : 23.5;
+    const safeLng = typeof lng === "number" && !Number.isNaN(lng) ? lng : 121.0;
+    places.push({
+      id: placeId,
+      name: name.trim() || "未命名地點",
+      intro: "由聊天室自動產生行程",
+      address: "尚未提供地址",
+      phone: "",
+      website: "",
+      rating: 0,
+      hours: "",
+      reasons: [],
+      notes: [],
+      stayMinutes: 60,
+      estimatedCost: 0,
+      recommended: false,
+      x: 0,
+      y: 0,
+      lat: safeLat,
+      lng: safeLng,
+      googleComments: []
+    });
+    return placeId;
+  }
+
+  function normalizeTransportFromPlanner(raw: string | undefined): TransportMode {
+    const s = (raw || "").toLowerCase();
+    if (s === "drive" || s === "driving" || s === "car") return "drive";
+    if (s === "transit" || s === "public_transit") return "transit";
+    if (s === "walk" || s === "walking") return "walk";
+    if (s === "bike" || s === "bicycling" || s === "cycle") return "bike";
+    return "transit";
+  }
+
+  function applyItineraryPlanFromChat(plan: ChatItineraryPlanPayload): void {
+    const srcDays = Array.isArray(plan.days) ? plan.days : [];
+    if (srcDays.length === 0) {
+      return;
+    }
+    setPrimaryTab("chat");
+    setSecondaryTab("itinerary");
+    const nextTransport: Record<string, TransportMode> = {};
+    const newDays: DayPlan[] = srcDays.map((day, dayIdx) => {
+      const dayId = `day${dayIdx + 1}`;
+      const label =
+        (day.date_label && String(day.date_label).trim()) || `Day ${day.day_number ?? dayIdx + 1}`;
+      const slots = Array.isArray(day.slots) ? day.slots : [];
+      const placeIds: string[] = [];
+      slots.forEach((slot, slotIdx) => {
+        const rawName = String(slot.place_name || "").trim() || "未命名地點";
+        const seed = `${dayIdx}-${slotIdx}-${slot.segment_id ?? slotIdx}`;
+        const placeId = upsertChatPlanPlace(rawName, seed, slot.lat, slot.lng);
+        placeIds.push(placeId);
+        if (slotIdx > 0) {
+          const legIndex = slotIdx - 1;
+          const mode = normalizeTransportFromPlanner(slot.travel_mode);
+          nextTransport[`${dayId}:${legIndex}-${legIndex + 1}`] = mode;
+        }
+      });
+      return { id: dayId, label, placeIds };
+    });
+    commit((draft) => {
+      draft.days = newDays;
+      draft.selectedDayId = newDays[0]?.id ?? "day1";
+      draft.pendingPlaceIds = [];
+      draft.transportModes = nextTransport;
+    });
+    setAiSettingsNotice("已套用聊天室產生的行程：左欄為對話，右欄為行程表，可再調整。");
   }
 
   function upsertLoadedPlace(name: string, uniqueSeed: string): string {
@@ -2289,6 +2802,11 @@ function HomePageInner() {
       persistActiveItineraryId(itineraryId);
       setAiSettingsNotice("已載入已儲存行程。");
     } catch (error) {
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(STORAGE_ACTIVE_ITINERARY_ID);
+      }
+      setActiveItineraryId(null);
+      setSelectedItineraryId(null);
       setChatError(error instanceof Error ? error.message : "載入已儲存行程失敗");
     } finally {
       setLoadingSavedItinerary(false);
@@ -2486,13 +3004,13 @@ function HomePageInner() {
     }
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, width, height);
-    ctx.fillStyle = "#0f172a";
+    ctx.fillStyle = "#1B4965";
     ctx.font = "bold 34px sans-serif";
     ctx.fillText("AIYO 行程匯出", 40, 55);
     ctx.font = "20px sans-serif";
     let y = 95;
     state.days.forEach((day, dayIdx) => {
-      ctx.fillStyle = "#111827";
+      ctx.fillStyle = "#1B4965";
       ctx.font = "bold 22px sans-serif";
       ctx.fillText(`Day ${dayIdx + 1} - ${day.label}`, 40, y);
       y += rowHeight;
@@ -2501,7 +3019,7 @@ function HomePageInner() {
         if (!place) {
           return;
         }
-        ctx.fillStyle = "#334155";
+        ctx.fillStyle = "#64748B";
         ctx.font = "18px sans-serif";
         ctx.fillText(`${idx + 1}. ${place.name}`, 70, y);
         y += rowHeight;
@@ -2663,14 +3181,12 @@ function HomePageInner() {
     }
     setMemoryReviewing(true);
     setMemoryNotice(null);
-    setChatError(null);
     try {
       const rebuildResponse = await apiFetchWithAuth(`${API_BASE_URL}/api/user/memory/rebuild`, {
         method: "POST",
       });
       if (!rebuildResponse.ok) {
-        const data = (await rebuildResponse.json().catch(() => ({}))) as { error?: string; detail?: string };
-        throw new Error(data.error || data.detail || "AI 記憶巡檢失敗");
+        return;
       }
       const result = (await rebuildResponse.json()) as { inserted?: number; skipped?: number; candidates?: number };
       const memoryResponse = await apiFetchWithAuth(`${API_BASE_URL}/api/user/memory?limit=8`);
@@ -2685,23 +3201,387 @@ function HomePageInner() {
           result.skipped ?? 0
         } 筆。`
       );
-    } catch (error) {
-      setChatError(error instanceof Error ? error.message : "AI 記憶巡檢失敗");
+    } catch {
+      /* 背景記憶巡檢失敗時不阻斷聊天、不顯示錯誤 toast */
     } finally {
       setMemoryReviewing(false);
     }
   }
 
+  function handleContentTabChange(clicked: ContentTab) {
+    if (secondaryTab === null) {
+      if (primaryTab === "chat" && clicked !== "chat") {
+        setSecondaryTab(clicked);
+        return;
+      }
+      if (primaryTab === "search" && clicked === "itinerary") {
+        setSecondaryTab("itinerary");
+        return;
+      }
+      if (primaryTab === "itinerary" && clicked === "search") {
+        setSecondaryTab("search");
+        return;
+      }
+      if (primaryTab !== "chat" && clicked === "chat") {
+        setSecondaryTab(primaryTab);
+        setPrimaryTab("chat");
+        return;
+      }
+      setPrimaryTab(clicked);
+      return;
+    }
+    if (clicked === secondaryTab || clicked === primaryTab) {
+      setSecondaryTab(null);
+      return;
+    }
+    setPrimaryTab(clicked);
+    setSecondaryTab(null);
+  }
+
+  function openSearchForAddPlace() {
+    if (primaryTab === "chat" && secondaryTab === null) {
+      setSecondaryTab("search");
+      return;
+    }
+    if (primaryTab === "chat" && secondaryTab !== null) {
+      setSecondaryTab("search");
+      return;
+    }
+    if (primaryTab === "itinerary" && secondaryTab === null) {
+      setSecondaryTab("search");
+      return;
+    }
+    setPrimaryTab("search");
+    setSecondaryTab(null);
+  }
+
+  const splitActive = secondaryTab !== null || primaryTab === "search";
+  const showRightColumn = secondaryTab !== null || primaryTab === "search";
 
   const contentTabItems = [
     { id: "chat" as const, label: "Chat", icon: <MessageCircle size={14} /> },
     { id: "search" as const, label: "Search", icon: <Search size={14} /> },
     { id: "saved" as const, label: "Saved", icon: <Heart size={14} /> },
+    { id: "itinerary" as const, label: "Itinerary", icon: <MapIcon size={14} /> },
   ];
-  const [contentTab, setContentTab] = useState<"chat" | "search" | "saved">("chat");
-  const [tripPanelTab, setTripPanelTab] = useState("itinerary");
-  const [showTripPanel, setShowTripPanel] = useState(false);
-  const [searchAddMenuResultId, setSearchAddMenuResultId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!splitDragging) {
+      return;
+    }
+    document.body.classList.add("select-none");
+    const onMove = (e: MouseEvent) => {
+      const d = splitDragRef.current;
+      const container = centerSplitContainerRef.current;
+      if (!d || !container) {
+        return;
+      }
+      const w = container.getBoundingClientRect().width;
+      const delta = e.clientX - d.startX;
+      const next = d.startRatio + delta / w;
+      setSplitRatio(Math.min(0.75, Math.max(0.25, next)));
+    };
+    const onUp = () => {
+      splitDragRef.current = null;
+      setSplitDragging(false);
+      document.body.classList.remove("select-none");
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("select-none");
+    };
+  }, [splitDragging]);
+
+  function handleSplitMouseDown(e: ReactMouseEvent) {
+    e.preventDefault();
+    const container = centerSplitContainerRef.current;
+    if (!container) {
+      return;
+    }
+    splitDragRef.current = {
+      startX: e.clientX,
+      startRatio: splitRatio,
+      width: container.getBoundingClientRect().width,
+    };
+    setSplitDragging(true);
+  }
+
+  function renderSearchPanel() {
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden p-4">
+        <p className="mb-2 text-xs text-muted">輸入關鍵字搜尋景點，點結果可定位地圖；點「加入行程」可加入指定天數或待排入。</p>
+        <form className="mb-4 flex items-center gap-2" onSubmit={onMapSearchSubmit}>
+          <div className="flex flex-1 items-center rounded-2xl border border-border bg-surface-muted px-4">
+            <Search size={16} className="text-muted mr-2" />
+            <input
+              id="map-search-input"
+              name="map-search"
+              ref={searchInputRef}
+              className="min-w-0 flex-1 bg-transparent py-2.5 text-sm text-primary placeholder:text-muted outline-none"
+              placeholder="Search places..."
+              value={searchText}
+              onChange={(event) => onMapSearchInputChange(event.target.value)}
+              aria-label="搜尋地點"
+            />
+          </div>
+          <Button type="submit" size="sm">Search</Button>
+        </form>
+
+        {mapActionError && (
+          <p className="mb-3 rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">{mapActionError}</p>
+        )}
+
+        <div className="flex-1 overflow-y-auto space-y-2">
+          {mapSearchResults.map((result, index) => (
+            <div
+              key={result.id}
+              className="flex items-center gap-3 rounded-xl p-3 transition-colors hover:bg-surface-muted"
+            >
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                onClick={() => focusSearchResult(result)}
+              >
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-surface-muted text-sm font-semibold text-muted">
+                  {index + 1}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-primary">{result.name}</p>
+                  <p className="text-xs text-muted truncate">{result.address}</p>
+                </div>
+                {result.rating && (
+                  <span className="text-xs text-muted shrink-0">{result.rating}</span>
+                )}
+              </button>
+              <div className="relative shrink-0">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setSearchAddMenuResultId((id) => (id === result.id ? null : result.id))}
+                >
+                  加入行程
+                </Button>
+                {searchAddMenuResultId === result.id && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-10"
+                      aria-hidden
+                      onClick={() => setSearchAddMenuResultId(null)}
+                    />
+                    <div className="absolute right-0 top-full z-20 mt-1 min-w-[120px] rounded-lg border border-border bg-surface py-1 shadow-modal">
+                      {state.days.map((day, idx) => (
+                        <button
+                          key={day.id}
+                          type="button"
+                          className="w-full px-3 py-2 text-left text-sm text-primary hover:bg-surface-muted"
+                          onClick={() => {
+                            addSearchResultToDayOrPending(result, day.id);
+                            setSearchAddMenuResultId(null);
+                          }}
+                        >
+                          Day {idx + 1}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        className="w-full px-3 py-2 text-left text-sm text-muted hover:bg-surface-muted"
+                        onClick={() => {
+                          addSearchResultToDayOrPending(result, "pending");
+                          setSearchAddMenuResultId(null);
+                        }}
+                      >
+                        待排入
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+          {mapSearchResults.length === 0 && !mapActionError && (
+            <p className="py-8 text-center text-sm text-muted">
+              Search for places to add to your trip
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderSavedPanel() {
+    return (
+      <div className="flex flex-1 flex-col overflow-hidden p-4">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-primary">Saved Itineraries</h3>
+          <Button size="sm" variant="outline" onClick={() => void saveItineraryToServer()}>
+            Save current
+          </Button>
+        </div>
+        <div className="flex-1 overflow-y-auto space-y-2">
+          {savedItineraries.map((item) => (
+            <button
+              key={item.id}
+              className="flex w-full items-center gap-3 rounded-xl border border-border p-3 text-left hover:bg-surface-muted transition-colors"
+              onClick={() => {
+                setSelectedItineraryId(item.id);
+                void loadSavedItinerary(item.id);
+              }}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-primary">{item.title || "Untitled trip"}</p>
+                <p className="text-xs text-muted">
+                  {item.days_count || 0} days {item.status && `/ ${item.status}`}
+                </p>
+              </div>
+            </button>
+          ))}
+          {savedItineraries.length === 0 && (
+            <p className="py-8 text-center text-sm text-muted">
+              No saved trips yet
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderTripPanelColumn() {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <TripPanel
+          tripName={`Trip ${state.days.length} days`}
+          dates={state.days[0]?.label}
+          days={state.days}
+          selectedDayId={state.selectedDayId}
+          dayTimeline={selectedDayTimeline}
+          places={places}
+          activeTab={tripPanelTab}
+          onTabChange={setTripPanelTab}
+          onSelectDay={selectDay}
+          onLegTransportModeChange={handleLegTransportModeChange}
+          onUndo={() => setHistoryIndex((idx) => Math.max(0, idx - 1))}
+          onRedo={() => setHistoryIndex((idx) => Math.min(history.length - 1, idx + 1))}
+          canUndo={historyIndex > 0}
+          canRedo={historyIndex < history.length - 1}
+          onPlaceDetails={(placeId) => setSelectedPlaceId(placeId)}
+          onPlaceRemove={(placeId, index) => removeFromSelectedDay(placeId, index)}
+          onPlaceDragStart={(index) => setDragIndex(index)}
+          onPlaceDrop={(index) => {
+            if (dragIndex !== null) {
+              reorder(dragIndex, index);
+            }
+            setDragIndex(null);
+          }}
+          onAddDay={addDay}
+          onEditDayLabel={openDateEditModalForDay}
+          onAddPlace={openSearchForAddPlace}
+          onDeleteDay={deleteDay}
+          onSave={() => void saveItineraryToServer()}
+        />
+      </div>
+    );
+  }
+
+  function renderMapColumn() {
+    return (
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={mapContainerRef}
+          className={splitDragging ? "pointer-events-none h-full w-full" : "h-full w-full"}
+        />
+        {mapError && (
+          <div className="absolute left-3 top-3 rounded-lg border border-danger/20 bg-surface px-3 py-2 text-xs text-danger shadow-card">
+            {mapError}
+          </div>
+        )}
+        {!mapError && !mapReady && (
+          <div className="absolute inset-0 flex items-center justify-center bg-surface/80 text-sm text-muted">
+            Loading map...
+          </div>
+        )}
+
+        {selectedPlace && (
+          <div
+            className="absolute right-3 top-3 w-[360px] max-w-[92%] rounded-2xl border border-border bg-surface p-4 text-sm shadow-modal animate-slide-up"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold text-primary">{selectedPlace.name}</h3>
+            <p className="mt-1 text-muted">{selectedPlace.intro}</p>
+
+            <div className="mt-3 space-y-1.5">
+              <div className="flex items-start gap-2 text-xs">
+                <span className="w-16 shrink-0 text-muted">Address</span>
+                <span className="text-primary">{selectedPlace.address}</span>
+              </div>
+              <div className="flex items-start gap-2 text-xs">
+                <span className="w-16 shrink-0 text-muted">Phone</span>
+                <span className="text-primary">{selectedPlace.phone}</span>
+              </div>
+              <div className="flex items-start gap-2 text-xs">
+                <span className="w-16 shrink-0 text-muted">Rating</span>
+                <span className="text-primary">{selectedPlace.rating}</span>
+              </div>
+              <div className="flex items-start gap-2 text-xs">
+                <span className="w-16 shrink-0 text-muted">Hours</span>
+                <span className="text-primary">{selectedPlace.hours}</span>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {selectedPlace.reasons.map((reason) => (
+                <span key={reason} className="rounded-btn bg-surface-muted px-2.5 py-1 text-xs text-primary">
+                  {reason}
+                </span>
+              ))}
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <a
+                href={selectedPlace.website}
+                className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Website
+              </a>
+              <button
+                className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
+                type="button"
+                onClick={() => openStreetViewAt(selectedPlace.lat, selectedPlace.lng)}
+              >
+                Street View
+              </button>
+            </div>
+
+            <div className="mt-3 border-t border-border pt-3">
+              <p className="mb-2 text-xs font-medium text-primary">Add to trip</p>
+              <div className="flex flex-wrap gap-1.5">
+                {state.days.map((day, idx) => (
+                  <button
+                    key={day.id}
+                    className="rounded-btn bg-surface-muted px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-colors"
+                    onClick={() => addToDayOrPending(selectedPlace.id, day.id)}
+                  >
+                    Day {idx + 1}
+                  </button>
+                ))}
+                <button
+                  className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
+                  onClick={() => addToDayOrPending(selectedPlace.id, "pending")}
+                >
+                  Queue
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     !authReady ? (
@@ -2721,6 +3601,10 @@ function HomePageInner() {
           setChatSessionId(newId);
           setChatMessages(INITIAL_CHAT_MESSAGES);
           setChatError(null);
+          setRecommendedVideos([]);
+          setLastRecommendationQuery("");
+          setToolCallSummaries([]);
+          setPlayerVideo(null);
           const nextState = createInitialState();
           setHistory([nextState]);
           setHistoryIndex(0);
@@ -2740,25 +3624,33 @@ function HomePageInner() {
             budget={state.totalBudget > 0 ? `$${state.totalBudget}` : undefined}
             onInvite={() => void copyShareLink()}
             onCreateTrip={() => void saveItineraryToServer()}
-            onEditDestination={() => {}}
+            onEditDestination={() => { setChatInput("I want to change the destination to "); }}
             onEditDates={openDateEditModal}
-            onEditTravelers={() => {}}
-            onEditBudget={() => {}}
+            onEditTravelers={() => { setChatInput("Change the number of travelers to "); }}
+            onEditBudget={() => { setChatInput("Set the budget to "); }}
           />
 
-          {/* Content area with tabs */}
-          <div className="flex flex-1 overflow-hidden">
-            {/* Center panel: Chat + Videos */}
-            <div className="flex w-1/2 flex-col border-r border-border overflow-hidden">
+          {/* Content area: primary left + optional secondary right；Search 時顯示地圖欄 */}
+          <div ref={centerSplitContainerRef} className="flex flex-1 min-h-0 overflow-hidden">
+            <div
+              className={
+                splitActive
+                  ? "flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-border"
+                  : "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-r border-border"
+              }
+              style={splitActive ? { width: `${splitRatio * 100}%`, flexShrink: 0 } : undefined}
+            >
               <div className="border-b border-border px-4 pt-3">
                 <Tabs
                   items={contentTabItems}
-                  activeId={contentTab}
-                  onChange={(id) => setContentTab(id as "chat" | "search" | "saved")}
+                  activeId={primaryTab}
+                  activeIds={secondaryTab ? [primaryTab, secondaryTab] : undefined}
+                  onChange={(id) => handleContentTabChange(id as ContentTab)}
                 />
               </div>
 
-              {contentTab === "chat" && (
+              {primaryTab === "chat" && (
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 <ChatPanel
                   messages={chatMessages}
                   chatInput={chatInput}
@@ -2772,281 +3664,66 @@ function HomePageInner() {
                   isRecording={isRecording}
                   onStartRecording={startVoiceInput}
                   onStopRecording={stopVoiceInput}
+                  modelOptions={modelOptions}
+                  selectedModel={selectedModel}
+                  onModelChange={(v) => setSelectedModel(v)}
+                  modelsLoading={modelsLoading}
+                  recommendedVideos={recommendedVideos}
+                  onPlayVideo={(video, startSec) => {
+                    setPlayerStartSec(startSec ?? 0);
+                    setPlayerVideo(video);
+                  }}
+                  onLikeVideo={(video, liked) => {
+                    void trackRecommendationEvent(liked ? "like" : "unlike", video);
+                  }}
+                  onLoadMore={loadMoreRecommendations}
+                  lastRecommendationQuery={lastRecommendationQuery}
+                  onQuickReplyClick={handleQuickReplyClick}
                 />
-              )}
-
-              {contentTab === "search" && (
-                <div className="flex flex-1 flex-col overflow-hidden p-4">
-                  <p className="mb-2 text-xs text-muted">輸入關鍵字搜尋景點，點結果可定位地圖；點「加入行程」可加入指定天數或待排入。</p>
-                  <form className="mb-4 flex items-center gap-2" onSubmit={onMapSearchSubmit}>
-                    <div className="flex flex-1 items-center rounded-2xl border border-border bg-surface-muted px-4">
-                      <Search size={16} className="text-muted mr-2" />
-                      <input
-                        id="map-search-input"
-                        name="map-search"
-                        ref={searchInputRef}
-                        className="min-w-0 flex-1 bg-transparent py-2.5 text-sm text-primary placeholder:text-muted outline-none"
-                        placeholder="Search places..."
-                        value={searchText}
-                        onChange={(event) => onMapSearchInputChange(event.target.value)}
-                        aria-label="搜尋地點"
-                      />
-                    </div>
-                    <Button type="submit" size="sm">Search</Button>
-                  </form>
-
-                  {mapActionError && (
-                    <p className="mb-3 rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">{mapActionError}</p>
-                  )}
-
-                  <div className="flex-1 overflow-y-auto space-y-2">
-                    {mapSearchResults.map((result, index) => (
-                      <div
-                        key={result.id}
-                        className="flex items-center gap-3 rounded-xl p-3 transition-colors hover:bg-surface-muted"
-                      >
-                        <button
-                          type="button"
-                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                          onClick={() => focusSearchResult(result)}
-                        >
-                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-surface-muted text-sm font-semibold text-muted">
-                            {index + 1}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium text-primary">{result.name}</p>
-                            <p className="text-xs text-muted truncate">{result.address}</p>
-                          </div>
-                          {result.rating && (
-                            <span className="text-xs text-muted shrink-0">{result.rating}</span>
-                          )}
-                        </button>
-                        <div className="relative shrink-0">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => setSearchAddMenuResultId((id) => (id === result.id ? null : result.id))}
-                          >
-                            加入行程
-                          </Button>
-                          {searchAddMenuResultId === result.id && (
-                            <>
-                              <div
-                                className="fixed inset-0 z-10"
-                                aria-hidden
-                                onClick={() => setSearchAddMenuResultId(null)}
-                              />
-                              <div className="absolute right-0 top-full z-20 mt-1 min-w-[120px] rounded-lg border border-border bg-surface py-1 shadow-modal">
-                                {state.days.map((day, idx) => (
-                                  <button
-                                    key={day.id}
-                                    type="button"
-                                    className="w-full px-3 py-2 text-left text-sm text-primary hover:bg-surface-muted"
-                                    onClick={() => {
-                                      addSearchResultToDayOrPending(result, day.id);
-                                      setSearchAddMenuResultId(null);
-                                    }}
-                                  >
-                                    Day {idx + 1}
-                                  </button>
-                                ))}
-                                <button
-                                  type="button"
-                                  className="w-full px-3 py-2 text-left text-sm text-muted hover:bg-surface-muted"
-                                  onClick={() => {
-                                    addSearchResultToDayOrPending(result, "pending");
-                                    setSearchAddMenuResultId(null);
-                                  }}
-                                >
-                                  待排入
-                                </button>
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                    {mapSearchResults.length === 0 && !mapActionError && (
-                      <p className="py-8 text-center text-sm text-muted">
-                        Search for places to add to your trip
-                      </p>
-                    )}
-                  </div>
                 </div>
               )}
 
-              {contentTab === "saved" && (
-                <div className="flex flex-1 flex-col overflow-hidden p-4">
-                  <div className="mb-4 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-primary">Saved Itineraries</h3>
-                    <Button size="sm" variant="outline" onClick={() => void saveItineraryToServer()}>
-                      Save current
-                    </Button>
-                  </div>
-                  <div className="flex-1 overflow-y-auto space-y-2">
-                    {savedItineraries.map((item) => (
-                      <button
-                        key={item.id}
-                        className="flex w-full items-center gap-3 rounded-xl border border-border p-3 text-left hover:bg-surface-muted transition-colors"
-                        onClick={() => {
-                          setSelectedItineraryId(item.id);
-                          void loadSavedItinerary(item.id);
-                        }}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium text-primary">{item.title || "Untitled trip"}</p>
-                          <p className="text-xs text-muted">
-                            {item.days_count || 0} days {item.status && `/ ${item.status}`}
-                          </p>
-                        </div>
-                      </button>
-                    ))}
-                    {savedItineraries.length === 0 && (
-                      <p className="py-8 text-center text-sm text-muted">
-                        No saved trips yet
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
+              {primaryTab === "search" && (secondaryTab === null || secondaryTab === "itinerary") && renderSearchPanel()}
+
+              {primaryTab === "saved" && secondaryTab === null && renderSavedPanel()}
+
+              {primaryTab === "itinerary" && (secondaryTab === null || secondaryTab === "search") && renderTripPanelColumn()}
             </div>
 
-            {/* Right panel: Map + Trip Panel toggle */}
-            <div className="flex w-1/2 flex-col overflow-hidden">
-              {/* Map section */}
-              <div className="relative flex-1">
-                <div ref={mapContainerRef} className="h-full w-full" />
-                {mapError && (
-                  <div className="absolute left-3 top-3 rounded-lg border border-danger/20 bg-surface px-3 py-2 text-xs text-danger shadow-card">
-                    {mapError}
-                  </div>
-                )}
-                {!mapError && !mapReady && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-surface/80 text-sm text-muted">
-                    Loading map...
-                  </div>
-                )}
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-hidden={!splitActive}
+              className={
+                splitActive
+                  ? "w-1 shrink-0 cursor-col-resize border-l border-r border-border bg-border hover:bg-primary/40"
+                  : "hidden"
+              }
+              onMouseDown={splitActive ? handleSplitMouseDown : undefined}
+            />
 
-                {/* Place detail overlay */}
-                {selectedPlace && (
-                  <div
-                    className="absolute right-3 top-3 w-[360px] max-w-[92%] rounded-2xl border border-border bg-surface p-4 text-sm shadow-modal animate-slide-up"
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    <h3 className="text-base font-semibold text-primary">{selectedPlace.name}</h3>
-                    <p className="mt-1 text-muted">{selectedPlace.intro}</p>
+            {showRightColumn && (
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                {secondaryTab === null && primaryTab === "search" && renderMapColumn()}
 
-                    <div className="mt-3 space-y-1.5">
-                      <div className="flex items-start gap-2 text-xs">
-                        <span className="w-16 shrink-0 text-muted">Address</span>
-                        <span className="text-primary">{selectedPlace.address}</span>
-                      </div>
-                      <div className="flex items-start gap-2 text-xs">
-                        <span className="w-16 shrink-0 text-muted">Phone</span>
-                        <span className="text-primary">{selectedPlace.phone}</span>
-                      </div>
-                      <div className="flex items-start gap-2 text-xs">
-                        <span className="w-16 shrink-0 text-muted">Rating</span>
-                        <span className="text-primary">{selectedPlace.rating}</span>
-                      </div>
-                      <div className="flex items-start gap-2 text-xs">
-                        <span className="w-16 shrink-0 text-muted">Hours</span>
-                        <span className="text-primary">{selectedPlace.hours}</span>
-                      </div>
+                {secondaryTab === "search" && (
+                  <div className="flex min-h-0 flex-1 flex-row">
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-r border-border">
+                      {renderSearchPanel()}
                     </div>
-
-                    <div className="mt-3 flex flex-wrap gap-1.5">
-                      {selectedPlace.reasons.map((reason) => (
-                        <span key={reason} className="rounded-btn bg-surface-muted px-2.5 py-1 text-xs text-primary">
-                          {reason}
-                        </span>
-                      ))}
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <a
-                        href={selectedPlace.website}
-                        className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Website
-                      </a>
-                      <button
-                        className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
-                        type="button"
-                        onClick={() => openStreetViewAt(selectedPlace.lat, selectedPlace.lng)}
-                      >
-                        Street View
-                      </button>
-                    </div>
-
-                    <div className="mt-3 border-t border-border pt-3">
-                      <p className="mb-2 text-xs font-medium text-primary">Add to trip</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {state.days.map((day, idx) => (
-                          <button
-                            key={day.id}
-                            className="rounded-btn bg-surface-muted px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-colors"
-                            onClick={() => addToDayOrPending(selectedPlace.id, day.id)}
-                          >
-                            Day {idx + 1}
-                          </button>
-                        ))}
-                        <button
-                          className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
-                          onClick={() => addToDayOrPending(selectedPlace.id, "pending")}
-                        >
-                          Queue
-                        </button>
-                      </div>
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                      {renderMapColumn()}
                     </div>
                   </div>
                 )}
 
-                {/* Trip panel toggle */}
-                <button
-                  onClick={() => setShowTripPanel(!showTripPanel)}
-                  className="absolute right-3 bottom-3 z-10 rounded-btn bg-primary px-4 py-2 text-xs font-medium text-primary-foreground shadow-card hover:bg-primary/90 transition-colors"
-                >
-                  {showTripPanel ? "Hide itinerary" : "Show itinerary"}
-                </button>
+                {secondaryTab === "saved" && renderSavedPanel()}
+
+                {secondaryTab === "itinerary" && renderTripPanelColumn()}
               </div>
-
-              {/* Collapsible Trip Panel */}
-              {showTripPanel && (
-                <div className="h-1/2 border-t border-border overflow-hidden">
-                  <TripPanel
-                    tripName={`Trip ${state.days.length} days`}
-                    dates={state.days[0]?.label}
-                    days={state.days}
-                    selectedDayId={state.selectedDayId}
-                    dayTimeline={selectedDayTimeline}
-                    places={places}
-                    activeTab={tripPanelTab}
-                    onTabChange={setTripPanelTab}
-                    onSelectDay={selectDay}
-                    onUndo={() => setHistoryIndex((idx) => Math.max(0, idx - 1))}
-                    onRedo={() => setHistoryIndex((idx) => Math.min(history.length - 1, idx + 1))}
-                    canUndo={historyIndex > 0}
-                    canRedo={historyIndex < history.length - 1}
-                    onPlaceDetails={(placeId) => setSelectedPlaceId(placeId)}
-                    onPlaceRemove={(placeId, index) => removeFromSelectedDay(placeId, index)}
-                    onPlaceDragStart={(index) => setDragIndex(index)}
-                    onPlaceDrop={(index) => {
-                      if (dragIndex !== null) { reorder(dragIndex, index); }
-                      setDragIndex(null);
-                    }}
-                    onAddDay={addDay}
-                    onEditDayLabel={openDateEditModalForDay}
-                    onAddPlace={() => setContentTab("search")}
-                    onSave={() => void saveItineraryToServer()}
-                  />
-                </div>
-              )}
-            </div>
+            )}
           </div>
+
         </div>
       </div>
 
@@ -3123,6 +3800,7 @@ function HomePageInner() {
           startSec={playerStartSec}
           onClose={() => setPlayerVideo(null)}
           onJumpToTime={(sec) => setPlayerStartSec(sec)}
+          onFocusPlaceByName={focusPlaceByNameFromVideo}
         />
       )}
 

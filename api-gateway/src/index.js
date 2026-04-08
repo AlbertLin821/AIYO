@@ -200,30 +200,47 @@ app.get("/metrics", async (_req, res) => {
   res.send(await metricsRegistry.metrics());
 });
 
-app.get("/api/models", async (_req, res) => {
-  try {
-    const response = await fetch(`${config.ollamaBaseUrl}/api/tags`);
-    if (!response.ok) {
-      res.json({
-        models: config.ollamaModel ? [{ name: config.ollamaModel }] : [],
-        selected: config.ollamaModel
-      });
-      return;
-    }
-    const data = await response.json();
-    const names = Array.from(
-      new Set((data.models || []).map((item) => item?.name).filter((name) => typeof name === "string"))
-    );
-    if (names.length === 0 && config.ollamaModel) {
-      names.push(config.ollamaModel);
-    }
-    res.json({ models: names.map((name) => ({ name })), selected: config.ollamaModel || names[0] || "" });
-  } catch {
-    res.json({
-      models: config.ollamaModel ? [{ name: config.ollamaModel }] : [],
-      selected: config.ollamaModel
-    });
+const ALLOWED_OLLAMA_MODELS = ["gemma4:26b", "gemma4:e4b"];
+
+app.get("/api/models", (_req, res) => {
+  const raw = (config.ollamaModel || "gemma4:e4b").trim();
+  const selected = ALLOWED_OLLAMA_MODELS.includes(raw) ? raw : "gemma4:e4b";
+  res.json({
+    models: ALLOWED_OLLAMA_MODELS.map((name) => ({ name })),
+    selected
+  });
+});
+
+app.post("/api/auth/check-email", async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) {
+    res.status(400).json({ error: "email 為必填" });
+    return;
   }
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const result = await pool.query("SELECT id FROM users WHERE email = $1", [normalizedEmail]);
+  res.json({ exists: result.rows.length > 0 });
+});
+
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { email, newPassword } = req.body || {};
+  if (!email || !newPassword) {
+    res.status(400).json({ error: "email 與 newPassword 為必填" });
+    return;
+  }
+  if (String(newPassword).length < 6) {
+    res.status(400).json({ error: "新密碼至少 6 個字元" });
+    return;
+  }
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const userResult = await pool.query("SELECT id FROM users WHERE email = $1", [normalizedEmail]);
+  if (!userResult.rows[0]) {
+    res.status(404).json({ error: "找不到此電子郵件對應的帳戶" });
+    return;
+  }
+  const newHash = await hashPassword(String(newPassword));
+  await pool.query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2", [newHash, userResult.rows[0].id]);
+  res.json({ ok: true });
 });
 
 app.post("/api/auth/register", async (req, res) => {
@@ -346,6 +363,54 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
 app.post("/api/auth/logout", requireAuth, (_req, res) => {
   clearRefreshTokenCookie(res);
   res.json({ ok: true });
+});
+
+app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) {
+    res.status(400).json({ error: "currentPassword 與 newPassword 為必填" });
+    return;
+  }
+  if (String(newPassword).length < 6) {
+    res.status(400).json({ error: "新密碼至少 6 個字元" });
+    return;
+  }
+  const userResult = await pool.query("SELECT id, password_hash FROM users WHERE id = $1", [req.user.id]);
+  const user = userResult.rows[0];
+  if (!user) {
+    res.status(404).json({ error: "找不到使用者" });
+    return;
+  }
+  const ok = await verifyPassword(String(currentPassword), user.password_hash);
+  if (!ok) {
+    res.status(401).json({ error: "目前密碼錯誤" });
+    return;
+  }
+  const newHash = await hashPassword(String(newPassword));
+  await pool.query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2", [newHash, req.user.id]);
+  res.json({ ok: true });
+});
+
+app.delete("/api/auth/account", requireAuth, async (req, res) => {
+  const userId = req.user.id;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM chat_messages WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id = $1)", [userId]);
+    await client.query("DELETE FROM chat_sessions WHERE user_id = $1", [userId]);
+    await client.query("DELETE FROM user_memories WHERE user_id = $1", [userId]);
+    await client.query("DELETE FROM user_ai_settings WHERE user_id = $1", [userId]);
+    await client.query("DELETE FROM user_profiles WHERE user_id = $1", [userId]);
+    await client.query("DELETE FROM users WHERE id = $1", [userId]);
+    await client.query("COMMIT");
+    clearRefreshTokenCookie(res);
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: "刪除帳戶失敗" });
+  } finally {
+    client.release();
+  }
 });
 
 app.get("/api/user/profile", requireAuth, async (req, res) => {
@@ -527,7 +592,7 @@ app.post("/api/recommendation/event", requireAuth, async (req, res) => {
     recommendation_reason, location_source, personalization_signals,
     feedback_action, dwell_time_ms
   } = req.body || {};
-  const validTypes = ["impression", "click", "segment_jump", "itinerary_adopt", "dismiss"];
+  const validTypes = ["impression", "click", "segment_jump", "itinerary_adopt", "dismiss", "like", "unlike"];
   if (!event_type || !validTypes.includes(event_type)) {
     res.status(400).json({ error: `event_type must be one of: ${validTypes.join(", ")}` });
     return;
@@ -563,6 +628,39 @@ app.post("/api/recommendation/event", requireAuth, async (req, res) => {
   } catch (error) {
     console.error("[recommendation_event] insert failed:", error.message);
     res.status(500).json({ error: "event insert failed" });
+  }
+});
+
+app.post("/api/recommendation/more", requireAuth, async (req, res) => {
+  const { exclude_youtube_ids, last_query, city, limit } = req.body || {};
+  const excludeIds = Array.isArray(exclude_youtube_ids) ? exclude_youtube_ids.filter((id) => typeof id === "string") : [];
+  const query = typeof last_query === "string" ? last_query.trim() : "";
+  const limitNum = Math.min(20, Math.max(1, parseInt(limit, 10) || 5));
+  try {
+    const response = await fetch(`${config.aiServiceUrl}/api/recommendation/more`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
+      },
+      body: JSON.stringify({
+        user_id: req.user.id,
+        exclude_youtube_ids: excludeIds,
+        last_query: query || "旅遊",
+        city: city || null,
+        limit: limitNum
+      })
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      res.status(response.status).json({ error: text || "recommendation/more failed" });
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    res.json({ recommended_videos: data.recommended_videos ?? [] });
+  } catch (error) {
+    console.error("[recommendation/more] request failed:", error.message);
+    res.status(502).json({ error: "recommendation service unavailable" });
   }
 });
 
@@ -866,6 +964,106 @@ app.post("/api/search-segments", requireAuth, async (req, res) => {
   res.status(response.status).json(data);
 });
 
+app.get("/api/videos/by-youtube/:youtubeId/segments", requireAuth, async (req, res) => {
+  const { youtubeId } = req.params;
+  const response = await fetch(
+    `${config.aiServiceUrl}/api/videos/by-youtube/${encodeURIComponent(youtubeId)}/segments`
+  );
+  const data = await response.json().catch(() => []);
+  res.status(response.status).json(data);
+});
+
+app.get("/api/videos/:videoId/segments", requireAuth, async (req, res) => {
+  const { videoId } = req.params;
+  const response = await fetch(`${config.aiServiceUrl}/api/videos/${videoId}/segments`);
+  const data = await response.json().catch(() => []);
+  res.status(response.status).json(data);
+});
+
+const VIDEO_OUTLINE_COOLDOWN_MS = 30_000;
+const videoOutlineLastCall = new Map();
+
+app.post("/api/videos/by-youtube/:youtubeId/ai-outline", requireAuth, async (req, res) => {
+  const { youtubeId } = req.params;
+  const userId = req.user?.id ?? "anon";
+  const key = `${userId}:yt:${youtubeId}`;
+  const now = Date.now();
+  const last = videoOutlineLastCall.get(key) || 0;
+  if (now - last < VIDEO_OUTLINE_COOLDOWN_MS) {
+    res.status(429).json({
+      error: "rate_limited",
+      retry_after_ms: VIDEO_OUTLINE_COOLDOWN_MS - (now - last)
+    });
+    return;
+  }
+  videoOutlineLastCall.set(key, now);
+  const response = await fetch(
+    `${config.aiServiceUrl}/api/videos/by-youtube/${encodeURIComponent(youtubeId)}/ai-outline`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
+      },
+      body: JSON.stringify(req.body || {})
+    }
+  );
+  const data = await response.json().catch(() => ({}));
+  res.status(response.status).json(data);
+});
+
+app.post("/api/videos/preview-ai-outline", requireAuth, async (req, res) => {
+  const userId = req.user?.id ?? "anon";
+  const key = `${userId}:preview:${JSON.stringify(req.body || {})
+    .slice(0, 120)}`;
+  const now = Date.now();
+  const last = videoOutlineLastCall.get(key) || 0;
+  if (now - last < VIDEO_OUTLINE_COOLDOWN_MS) {
+    res.status(429).json({
+      error: "rate_limited",
+      retry_after_ms: VIDEO_OUTLINE_COOLDOWN_MS - (now - last)
+    });
+    return;
+  }
+  videoOutlineLastCall.set(key, now);
+  const response = await fetch(`${config.aiServiceUrl}/api/videos/preview-ai-outline`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
+    },
+    body: JSON.stringify(req.body || {})
+  });
+  const data = await response.json().catch(() => ({}));
+  res.status(response.status).json(data);
+});
+
+app.post("/api/videos/:videoId/ai-outline", requireAuth, async (req, res) => {
+  const { videoId } = req.params;
+  const userId = req.user?.id ?? "anon";
+  const key = `${userId}:${videoId}`;
+  const now = Date.now();
+  const last = videoOutlineLastCall.get(key) || 0;
+  if (now - last < VIDEO_OUTLINE_COOLDOWN_MS) {
+    res.status(429).json({
+      error: "rate_limited",
+      retry_after_ms: VIDEO_OUTLINE_COOLDOWN_MS - (now - last)
+    });
+    return;
+  }
+  videoOutlineLastCall.set(key, now);
+  const response = await fetch(`${config.aiServiceUrl}/api/videos/${videoId}/ai-outline`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(config.aiServiceInternalToken ? { "x-internal-token": config.aiServiceInternalToken } : {})
+    },
+    body: JSON.stringify(req.body || {})
+  });
+  const data = await response.json().catch(() => ({}));
+  res.status(response.status).json(data);
+});
+
 function normalizeItineraryDays(rawDays) {
   if (!Array.isArray(rawDays)) {
     return [];
@@ -1042,8 +1240,20 @@ app.post("/api/itinerary", requireAuth, async (req, res) => {
   res.status(201).json(created);
 });
 
+function parseItineraryId(rawId) {
+  const id = Number(rawId);
+  if (!Number.isInteger(id) || id <= 0) {
+    return null;
+  }
+  return id;
+}
+
 app.get("/api/itinerary/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parseItineraryId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "invalid itinerary id" });
+    return;
+  }
   const itinerary = await pool.query("SELECT * FROM itineraries WHERE id = $1 AND user_id = $2", [id, req.user.id]);
   if (!itinerary.rows[0]) {
     res.status(404).json({ error: "itinerary not found" });
@@ -1078,7 +1288,11 @@ app.get("/api/itinerary/:id", requireAuth, async (req, res) => {
 });
 
 app.put("/api/itinerary/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parseItineraryId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "invalid itinerary id" });
+    return;
+  }
   const { title, daysCount, status, days } = req.body || {};
   const normalizedDays = normalizeItineraryDays(days);
   const client = await pool.connect();
@@ -1125,7 +1339,11 @@ app.put("/api/itinerary/:id", requireAuth, async (req, res) => {
 });
 
 app.delete("/api/itinerary/:id", requireAuth, async (req, res) => {
-  const id = Number(req.params.id);
+  const id = parseItineraryId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "invalid itinerary id" });
+    return;
+  }
   const existing = await pool.query("SELECT session_id FROM itineraries WHERE id = $1 AND user_id = $2", [id, req.user.id]);
   const result = await pool.query("DELETE FROM itineraries WHERE id = $1 AND user_id = $2 RETURNING id", [id, req.user.id]);
   if (!result.rows[0]) {
@@ -1377,26 +1595,32 @@ ${dialogueText}
 ${existingMemoryText || "（無）"}
 `.trim();
 
-  const response = await fetch(`${config.ollamaBaseUrl}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: config.ollamaModel,
-      stream: false,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ]
-    })
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`memory ai review failed: ${response.status} ${text}`);
+  try {
+    const response = await fetch(`${config.ollamaBaseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: config.ollamaModel,
+        stream: false,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      })
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      console.warn("[memory ai review] Ollama returned non-OK:", response.status, text.slice(0, 200));
+      return [];
+    }
+    const data = await response.json().catch(() => ({}));
+    const content = data?.message?.content || "";
+    const parsedItems = parseJsonArrayFromText(content);
+    return parsedItems.map(sanitizeAiMemoryItem).filter(Boolean).slice(0, 12);
+  } catch (err) {
+    console.warn("[memory ai review] skipped:", err instanceof Error ? err.message : err);
+    return [];
   }
-  const data = await response.json();
-  const content = data?.message?.content || "";
-  const parsedItems = parseJsonArrayFromText(content);
-  return parsedItems.map(sanitizeAiMemoryItem).filter(Boolean).slice(0, 12);
 }
 
 async function saveExtractedMemories(userId, message) {
@@ -1527,14 +1751,43 @@ function extractRecommendedVideos(chunk) {
   return items;
 }
 
+function recommendationMergeKey(item) {
+  if (!item || typeof item !== "object") {
+    return null;
+  }
+  const yt = item.youtube_id;
+  if (typeof yt === "string" && yt.trim() !== "") {
+    return `yt:${yt.trim()}`;
+  }
+  const vid = item.video_id;
+  if (typeof vid === "number" && Number.isFinite(vid) && vid !== 0) {
+    return `id:${vid}`;
+  }
+  if (typeof vid === "string" && vid.trim() !== "") {
+    return `id:${vid.trim()}`;
+  }
+  const tit = item.title;
+  if (typeof tit === "string" && tit.trim() !== "") {
+    return `title:${tit.trim().slice(0, 120)}`;
+  }
+  return null;
+}
+
 function mergeRecommendedVideos(current, incoming) {
   if (!Array.isArray(incoming) || incoming.length === 0) {
     return current;
   }
-  const map = new Map(current.map((item) => [item.video_id, item]));
+  const map = new Map();
+  for (const item of current || []) {
+    const k = recommendationMergeKey(item);
+    if (k) {
+      map.set(k, item);
+    }
+  }
   for (const item of incoming) {
-    if (item && typeof item.video_id === "number") {
-      map.set(item.video_id, item);
+    const k = recommendationMergeKey(item);
+    if (k) {
+      map.set(k, item);
     }
   }
   return Array.from(map.values()).slice(0, 5);

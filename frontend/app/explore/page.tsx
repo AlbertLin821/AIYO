@@ -114,7 +114,18 @@ export default function ExplorePage() {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <Button>
+            <Button
+              onClick={() => {
+                if (navigator.geolocation) {
+                  navigator.geolocation.getCurrentPosition(
+                    (pos) => {
+                      setSearchQuery(`${pos.coords.latitude.toFixed(2)}, ${pos.coords.longitude.toFixed(2)}`);
+                    },
+                    () => setSearchQuery("Taipei"),
+                  );
+                }
+              }}
+            >
               <MapPin size={14} className="mr-1.5" />
               Near me
             </Button>
@@ -135,7 +146,10 @@ export default function ExplorePage() {
           <section className="mb-10">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-section-title text-primary">Popular destinations</h2>
-              <button className="text-sm font-medium text-primary hover:underline">
+              <button
+                className="text-sm font-medium text-primary hover:underline"
+                onClick={() => setActiveCategory("all")}
+              >
                 See all
               </button>
             </div>
@@ -199,13 +213,16 @@ export default function ExplorePage() {
                 <TrendingUp size={18} className="text-primary" />
                 <h2 className="text-section-title text-primary">Trending places</h2>
               </div>
-              <button className="text-sm font-medium text-primary hover:underline">
+              <button
+                className="text-sm font-medium text-primary hover:underline"
+                onClick={() => { setActiveCategory("all"); setSearchQuery(""); }}
+              >
                 See all
               </button>
             </div>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {filteredPlaces.map((place) => (
-                <Card key={place.id} hoverable>
+                <Card key={place.id} hoverable className="cursor-pointer" onClick={() => router.push(`/?destination=${encodeURIComponent(place.name)}`)}>
                   <CardImage>
                     <div className="flex h-full items-center justify-center bg-gradient-to-br from-surface-muted to-surface-hover">
                       <Camera size={32} className="text-muted/30" />

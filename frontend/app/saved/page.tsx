@@ -35,6 +35,44 @@ export default function SavedPage() {
   const [activeTab, setActiveTab] = useState<SavedTab>("places");
   const [savedItineraries, setSavedItineraries] = useState<SavedItinerary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
+  const [collectionName, setCollectionName] = useState("");
+  const [showCollectionModal, setShowCollectionModal] = useState(false);
+  const [collections, setCollections] = useState<Array<{ id: string; name: string; items: number[] }>>([]);
+
+  useEffect(() => {
+    try {
+      const raw = typeof window !== "undefined" && window.localStorage.getItem("aiyo_collections");
+      if (raw) setCollections(JSON.parse(raw) as Array<{ id: string; name: string; items: number[] }>);
+    } catch { /* ignore */ }
+  }, []);
+
+  function saveCollections(updated: Array<{ id: string; name: string; items: number[] }>) {
+    setCollections(updated);
+    try {
+      if (typeof window !== "undefined") window.localStorage.setItem("aiyo_collections", JSON.stringify(updated));
+    } catch { /* ignore */ }
+  }
+
+  function handleCreateCollection() {
+    if (!collectionName.trim()) return;
+    const newCol = { id: `col-${Date.now()}`, name: collectionName.trim(), items: [] as number[] };
+    saveCollections([...collections, newCol]);
+    setCollectionName("");
+    setShowCollectionModal(false);
+  }
+
+  function handleDeleteTrip(id: number) {
+    void (async () => {
+      try {
+        const res = await apiFetchWithAuth(`${API_BASE_URL}/api/itinerary/${id}`, { method: "DELETE" });
+        if (res.ok || res.status === 404) {
+          setSavedItineraries((prev) => prev.filter((it) => it.id !== id));
+        }
+      } catch { /* ignore */ }
+      setMenuOpenId(null);
+    })();
+  }
 
   useEffect(() => {
     async function fetchSaved() {
@@ -82,7 +120,7 @@ export default function SavedPage() {
                 Your saved trips, places, and collections.
               </p>
             </div>
-            <Button>
+            <Button onClick={() => setShowCollectionModal(true)}>
               <Plus size={14} className="mr-1.5" />
               New collection
             </Button>
@@ -144,12 +182,30 @@ export default function SavedPage() {
                               </div>
                             </CardDescription>
                           </div>
-                          <button
-                            className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface-muted transition-colors"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <MoreHorizontal size={16} />
-                          </button>
+                          <div className="relative">
+                            <button
+                              className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface-muted transition-colors"
+                              onClick={(e) => { e.stopPropagation(); setMenuOpenId(menuOpenId === item.id ? null : item.id); }}
+                            >
+                              <MoreHorizontal size={16} />
+                            </button>
+                            {menuOpenId === item.id && (
+                              <div className="absolute right-0 top-10 z-20 w-40 rounded-lg border border-border bg-surface p-1 shadow-modal">
+                                <button
+                                  className="w-full rounded-md px-3 py-2 text-left text-sm text-primary hover:bg-surface-muted"
+                                  onClick={(e) => { e.stopPropagation(); router.push(`/?itineraryId=${item.id}`); }}
+                                >
+                                  Open trip
+                                </button>
+                                <button
+                                  className="w-full rounded-md px-3 py-2 text-left text-sm text-danger hover:bg-danger/10"
+                                  onClick={(e) => { e.stopPropagation(); handleDeleteTrip(item.id); }}
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
                         {item.updated_at && (
                           <p className="mt-3 text-xs text-muted">
@@ -165,16 +221,43 @@ export default function SavedPage() {
           )}
 
           {activeTab === "collections" && (
-            <div className="flex flex-col items-center justify-center py-16">
-              <FolderOpen size={48} className="mb-4 text-muted/30" />
-              <h3 className="text-lg font-semibold text-primary">No collections yet</h3>
-              <p className="mt-2 text-sm text-muted">
-                Organize your saved places into custom collections.
-              </p>
-              <Button variant="outline" className="mt-6">
-                <Plus size={14} className="mr-1.5" />
-                Create collection
-              </Button>
+            <div>
+              {collections.length > 0 ? (
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {collections.map((col) => (
+                    <Card key={col.id} hoverable className="cursor-pointer">
+                      <CardContent className="p-5">
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <CardTitle className="text-base">{col.name}</CardTitle>
+                            <CardDescription className="mt-1">{col.items.length} items</CardDescription>
+                          </div>
+                          <button
+                            className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-surface-muted transition-colors"
+                            onClick={() => {
+                              saveCollections(collections.filter((c) => c.id !== col.id));
+                            }}
+                          >
+                            <MoreHorizontal size={16} />
+                          </button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16">
+                  <FolderOpen size={48} className="mb-4 text-muted/30" />
+                  <h3 className="text-lg font-semibold text-primary">No collections yet</h3>
+                  <p className="mt-2 text-sm text-muted">
+                    Organize your saved places into custom collections.
+                  </p>
+                  <Button variant="outline" className="mt-6" onClick={() => setShowCollectionModal(true)}>
+                    <Plus size={14} className="mr-1.5" />
+                    Create collection
+                  </Button>
+                </div>
+              )}
             </div>
           )}
 
@@ -185,14 +268,35 @@ export default function SavedPage() {
               <p className="mt-2 text-sm text-muted">
                 Create travel guides from your experiences.
               </p>
-              <Button variant="outline" className="mt-6">
+              <Button variant="outline" className="mt-6" onClick={() => router.push("/")}>
                 <Plus size={14} className="mr-1.5" />
-                Write a guide
+                Start a trip first
               </Button>
             </div>
           )}
         </div>
       </main>
+
+      {showCollectionModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setShowCollectionModal(false)} />
+          <div className="relative z-10 w-full max-w-sm rounded-card border border-border bg-surface p-6 shadow-modal mx-4">
+            <h3 className="text-lg font-semibold text-primary mb-4">New collection</h3>
+            <input
+              className="w-full rounded-lg border border-border bg-surface-muted px-4 py-2.5 text-sm text-primary placeholder:text-muted outline-none focus:border-primary"
+              placeholder="Collection name"
+              value={collectionName}
+              onChange={(e) => setCollectionName(e.target.value)}
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") handleCreateCollection(); }}
+            />
+            <div className="mt-4 flex justify-end gap-3">
+              <Button variant="outline" size="sm" onClick={() => setShowCollectionModal(false)}>Cancel</Button>
+              <Button size="sm" onClick={handleCreateCollection} disabled={!collectionName.trim()}>Create</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

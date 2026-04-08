@@ -64,9 +64,23 @@ function valueLooksPlaceholder(value) {
 }
 
 function readLocalEnvFallback() {
-  const envPath = path.resolve(process.cwd(), ".env");
-  if (!fs.existsSync(envPath)) return new Map();
-  return parseEnvFile(fs.readFileSync(envPath, "utf-8"));
+  const cwd = process.cwd();
+  const rootPath = path.resolve(cwd, ".env");
+  const merged = new Map();
+  if (fs.existsSync(rootPath)) {
+    for (const [k, v] of parseEnvFile(fs.readFileSync(rootPath, "utf-8"))) {
+      merged.set(k, v);
+    }
+  }
+  const fePath = path.resolve(cwd, "frontend", ".env.local");
+  if (fs.existsSync(fePath)) {
+    for (const [k, v] of parseEnvFile(fs.readFileSync(fePath, "utf-8"))) {
+      if (k.startsWith("NEXT_PUBLIC_") && !String(merged.get(k) || "").trim()) {
+        merged.set(k, v);
+      }
+    }
+  }
+  return merged;
 }
 
 function main() {

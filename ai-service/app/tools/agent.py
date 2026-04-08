@@ -238,6 +238,7 @@ async def resolve_tool_context(
             "used_tools": False,
             "direct_reply": "",
             "tool_calls_summary": [],
+            "youtube_tool_videos": [],
         }
 
     tools = get_tool_schemas(tool_flags)
@@ -247,6 +248,9 @@ async def resolve_tool_context(
     direct_reply = ""
     tool_calls_summary: List[Dict[str, Any]] = []
     forced_weather_once = False
+    weather_result_cache: Optional[Dict[str, Any]] = None
+    weather_summary_added = False
+    youtube_tool_videos: List[Dict[str, Any]] = []
 
     for _ in range(max(1, max_rounds)):
         planner_response = await client.post(
@@ -265,6 +269,7 @@ async def resolve_tool_context(
                 "used_tools": False,
                 "direct_reply": "",
                 "tool_calls_summary": tool_calls_summary,
+                "youtube_tool_videos": [],
             }
         planner_data = planner_response.json()
         assistant_message = (planner_data.get("message") or {}) if isinstance(planner_data, dict) else {}
@@ -287,6 +292,8 @@ async def resolve_tool_context(
                             source="get_weather",
                             error=f"{type(error).__name__}: {error}",
                         )
+                    weather_result_cache = forced_result
+                    weather_summary_added = True
                     used_tools = True
                     forced_summary = {
                         "tool": "get_weather",
@@ -315,6 +322,7 @@ async def resolve_tool_context(
                 "used_tools": used_tools,
                 "direct_reply": direct_reply,
                 "tool_calls_summary": tool_calls_summary,
+                "youtube_tool_videos": youtube_tool_videos,
             }
 
         used_tools = True
@@ -322,21 +330,51 @@ async def resolve_tool_context(
         for tool_call in tool_calls[: max(1, max_calls_per_round)]:
             name = tool_call["name"]
             args = dict(tool_call["arguments"])
-            handler = tool_executor.get(name)
-            if handler is None:
-                result = make_tool_result(ok=False, source="tool-executor", error=f"unsupported tool: {name}")
+            if name == "get_weather" and weather_result_cache is not None:
+                result = weather_result_cache
+                if not weather_summary_added:
+                    weather_summary_added = True
+                    tool_calls_summary.append(
+                        {
+                            "tool": name,
+                            "ok": bool(result.get("ok")),
+                            "source": result.get("source"),
+                            "error": result.get("error"),
+                            "arguments": args,
+                        }
+                    )
             else:
-                result = await _execute_with_retry(handler, args, context, name, max_retries=2)
+                handler = tool_executor.get(name)
+                if handler is None:
+                    result = make_tool_result(ok=False, source="tool-executor", error=f"unsupported tool: {name}")
+                else:
+                    result = await _execute_with_retry(handler, args, context, name, max_retries=2)
+                if name == "get_weather":
+                    weather_result_cache = result
+                    weather_summary_added = True
+                if name == "search_youtube_videos" and result.get("ok"):
+                    data = result.get("data") or {}
+                    for v in (data.get("videos") or [])[:10]:
+                        if isinstance(v, dict) and v.get("video_id"):
+                            youtube_tool_videos.append({
+                                "video_id": 0,
+                                "youtube_id": str(v.get("video_id", "")),
+                                "title": str(v.get("title", "")),
+                                "channel": str(v.get("channel", "")),
+                                "segments": [],
+                                "thumbnail_url": f"https://i.ytimg.com/vi/{v.get('video_id', '')}/mqdefault.jpg",
+                                "summary": str(v.get("description", "")),
+                            })
+                tool_calls_summary.append(
+                    {
+                        "tool": name,
+                        "ok": bool(result.get("ok")),
+                        "source": result.get("source"),
+                        "error": result.get("error"),
+                        "arguments": args,
+                    }
+                )
             tool_results.append({"tool": name, "arguments": args, "result": result})
-            tool_calls_summary.append(
-                {
-                    "tool": name,
-                    "ok": bool(result.get("ok")),
-                    "source": result.get("source"),
-                    "error": result.get("error"),
-                    "arguments": args,
-                }
-            )
 
         working_messages.append(
             {
@@ -353,4 +391,5 @@ async def resolve_tool_context(
         "used_tools": used_tools,
         "direct_reply": direct_reply,
         "tool_calls_summary": tool_calls_summary,
+        "youtube_tool_videos": youtube_tool_videos,
     }

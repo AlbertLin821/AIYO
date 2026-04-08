@@ -18,6 +18,7 @@ Python FastAPI 服務，負責 AI 對話、資料查詢與行程工具端點。
 - 串流過程以 SSE `data:` 回傳 token
 - 完成事件會夾帶 `recommended_videos`（最多 5 支）
 - 完成事件會夾帶 `used_mcp_tools` 與 `tool_calls_summary`
+- 若使用者訊息符合完整行程意圖且具備可排程之景點資料，完成事件可額外夾帶 `itinerary_plan`（`plan_itinerary_v2` 結構化結果），供前端寫入右欄行程
 - 推薦影片含縮圖、摘要與片段時間戳，供前端播放器跳轉
 
 ## 啟動方式
@@ -33,6 +34,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 OpenAPI: `http://localhost:8000/docs`
 
 ## 部署
+
+### 反向代理（Nginx）與 SSE 串流
+
+若經 **Nginx** 等反向代理轉發 `/api/chat` 的 **SSE**（`text/event-stream`），請在站點設定中把 **`proxy_read_timeout`** 調高（例如 600s 以上），否則長回應可能在代理層被提早關閉連線。逾時僅為部署層設定，本範例不修改應用程式內 `.env` 實檔。
 
 ### Docker 映像
 

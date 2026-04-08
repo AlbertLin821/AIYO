@@ -1,38 +1,14 @@
-type OllamaTagsResponse = {
-  models?: Array<{
-    name?: string;
-  }>;
-};
+/** 網站僅允許使用的 Ollama 模型（與 gateway / ai-service 一致） */
+const ALLOWED_MODELS = ["gemma4:26b", "gemma4:e4b"] as const;
 
 export async function GET() {
-  const baseUrl = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
-  const selected = process.env.OLLAMA_MODEL ?? "";
+  const selectedRaw = process.env.OLLAMA_MODEL ?? "gemma4:e4b";
+  const selected = ALLOWED_MODELS.includes(selectedRaw as (typeof ALLOWED_MODELS)[number])
+    ? selectedRaw
+    : "gemma4:e4b";
 
-  try {
-    const response = await fetch(`${baseUrl}/api/tags`, {
-      method: "GET",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store"
-    });
-
-    if (!response.ok) {
-      return Response.json({ models: selected ? [{ name: selected }] : [], selected });
-    }
-
-    const payload = (await response.json()) as OllamaTagsResponse;
-    const names = Array.from(
-      new Set((payload.models ?? []).map((item) => item.name).filter((name): name is string => Boolean(name)))
-    );
-
-    if (names.length === 0 && selected) {
-      names.push(selected);
-    }
-
-    return Response.json({
-      models: names.map((name) => ({ name })),
-      selected: selected || names[0] || ""
-    });
-  } catch {
-    return Response.json({ models: selected ? [{ name: selected }] : [], selected });
-  }
+  return Response.json({
+    models: ALLOWED_MODELS.map((name) => ({ name })),
+    selected
+  });
 }

@@ -82,7 +82,8 @@ export default function TripsPage() {
               {trips.map((item) => (
                 <Card
                   key={item.id}
-                  className="cursor-pointer transition-colors hover:bg-surface-muted"
+                  hoverable
+                  className="cursor-pointer"
                   onClick={() => router.push(`/?itineraryId=${item.id}`)}
                 >
                   <CardContent className="p-5">

@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS segments (
   summary TEXT,
   tags JSONB,
   city VARCHAR(100),
-  embedding_vector vector(384),
+  embedding_vector vector(768),
   created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS places (
   category VARCHAR(50),
   description TEXT,
   city VARCHAR(100),
-  embedding_vector vector(384),
+  embedding_vector vector(768),
   created_at TIMESTAMP DEFAULT NOW()
 );
 

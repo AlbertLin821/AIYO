@@ -113,6 +113,28 @@ class RerankCandidatesTests(unittest.TestCase):
         self.assertIn("rank_position", response[0])
         self.assertEqual(response[0]["rank_position"], 1)
 
+    def test_scored_to_response_youtube_only_gets_stable_video_id(self) -> None:
+        candidates = [
+            RecommendationCandidate(
+                source="youtube_api",
+                video_id=None,
+                youtube_id="dQw4w9WgXcQ",
+                title="Only YT",
+            ),
+            RecommendationCandidate(
+                source="youtube_api",
+                video_id=0,
+                youtube_id="anotherId123",
+                title="Second",
+            ),
+        ]
+        results = rerank_candidates(candidates, [], set(), "", "", [])
+        response = scored_to_response(results)
+        self.assertEqual(len(response), 2)
+        self.assertNotEqual(response[0]["video_id"], 0)
+        self.assertNotEqual(response[1]["video_id"], 0)
+        self.assertNotEqual(response[0]["video_id"], response[1]["video_id"])
+
 
 class BuildCandidatesTests(unittest.TestCase):
     def test_from_db_rows(self) -> None:
