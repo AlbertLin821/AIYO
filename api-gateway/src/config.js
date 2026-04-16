@@ -29,5 +29,12 @@ export const config = {
     return "aiyo_refresh_token";
   })(),
   enableGatewayMemoryExtract: String(process.env.ENABLE_GATEWAY_MEMORY_EXTRACT || "false").toLowerCase() === "true",
-  sentryDsn: process.env.SENTRY_DSN || ""
+  sentryDsn: process.env.SENTRY_DSN || "",
+  v1ReadonlyMode: String(process.env.V1_READONLY_MODE || "false").toLowerCase() === "true",
+  v1ReadonlyExcludedPrefixes: (process.env.V1_READONLY_EXCLUDED_PREFIXES || "/api/v2,/api/auth,/api/dev,/health,/metrics")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean),
+  legacyFrontendPath: process.env.LEGACY_FRONTEND_PATH || "/legacy",
+  v2JobPollIntervalMs: Math.max(500, Number(process.env.V2_JOB_POLL_INTERVAL_MS || 1200))
 };

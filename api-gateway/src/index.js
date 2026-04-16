@@ -9,6 +9,7 @@ import client from "prom-client";
 import { WebSocketServer } from "ws";
 import { config } from "./config.js";
 import { pool } from "./db.js";
+import { fetchV2JobStatus, registerV1ReadOnlyGuard, registerV2Routes } from "./v2Routes.js";
 import { cacheGet, cacheSet, getSessionHistory, initializeCache, setSessionHistory } from "./chatMemory.js";
 import {
   hashPassword,
@@ -210,6 +211,9 @@ app.get("/api/models", (_req, res) => {
     selected
   });
 });
+
+registerV1ReadOnlyGuard(app, config);
+registerV2Routes({ app, config, requireAuth });
 
 app.post("/api/auth/check-email", async (req, res) => {
   const { email } = req.body || {};
@@ -2192,9 +2196,105 @@ function broadcastToSession(sessionId, payload) {
   }
 }
 
+function getJobSubscriptionKey(jobId, kind) {
+  const normalizedKind = kind === "plan" || kind === "recommend" ? kind : "any";
+  return `${normalizedKind}:${jobId}`;
+}
+
+function ensureWsJobPollers(ws) {
+  if (!ws.jobPollers || !(ws.jobPollers instanceof Map)) {
+    ws.jobPollers = new Map();
+  }
+  return ws.jobPollers;
+}
+
+function stopJobPoller(ws, key) {
+  const pollers = ensureWsJobPollers(ws);
+  const handle = pollers.get(key);
+  if (handle) {
+    clearTimeout(handle);
+  }
+  pollers.delete(key);
+}
+
+function clearJobPollers(ws) {
+  const pollers = ensureWsJobPollers(ws);
+  for (const handle of pollers.values()) {
+    clearTimeout(handle);
+  }
+  pollers.clear();
+}
+
+function startJobPoller(ws, { jobId, kind }) {
+  const normalizedKind = kind === "plan" || kind === "recommend" ? kind : "";
+  const key = getJobSubscriptionKey(jobId, normalizedKind);
+  stopJobPoller(ws, key);
+  const traceId = generateTraceId();
+
+  const poll = async () => {
+    if (ws.readyState !== 1) {
+      stopJobPoller(ws, key);
+      return;
+    }
+
+    try {
+      const upstream = await fetchV2JobStatus({
+        config,
+        traceId,
+        jobId,
+        kind: normalizedKind
+      });
+      const data = upstream.data || { status: "failed", traceId, error: "job status unavailable" };
+      ws.send(
+        JSON.stringify({
+          type: "job_status",
+          jobId,
+          kind: normalizedKind || null,
+          payload: data
+        })
+      );
+
+      const status = String(data.status || "");
+      if (!upstream.ok || status === "completed" || status === "failed") {
+        ws.send(
+          JSON.stringify({
+            type: "job_done",
+            jobId,
+            kind: normalizedKind || null,
+            payload: data
+          })
+        );
+        stopJobPoller(ws, key);
+        return;
+      }
+    } catch (error) {
+      ws.send(
+        JSON.stringify({
+          type: "job_error",
+          jobId,
+          kind: normalizedKind || null,
+          error: String(error)
+        })
+      );
+    }
+
+    if (ws.readyState !== 1) {
+      stopJobPoller(ws, key);
+      return;
+    }
+    const handle = setTimeout(() => {
+      void poll();
+    }, Math.max(500, config.v2JobPollIntervalMs || 1200));
+    ensureWsJobPollers(ws).set(key, handle);
+  };
+
+  void poll();
+}
+
 wss.on("connection", (ws, request, user) => {
   ws.sessionId = "";
   ws.user = user || null;
+  ws.jobPollers = new Map();
 
   ws.send(
     JSON.stringify({
@@ -2225,6 +2325,30 @@ wss.on("connection", (ws, request, user) => {
       return;
     }
 
+    if (data.type === "subscribe_job") {
+      const jobId = typeof data.jobId === "string" ? data.jobId.trim() : "";
+      const kind = data.kind === "recommend" || data.kind === "plan" ? data.kind : "";
+      if (!jobId) {
+        ws.send(JSON.stringify({ type: "error", message: "jobId is required" }));
+        return;
+      }
+      startJobPoller(ws, { jobId, kind });
+      ws.send(JSON.stringify({ type: "job_subscribed", jobId, kind: kind || null }));
+      return;
+    }
+
+    if (data.type === "unsubscribe_job") {
+      const jobId = typeof data.jobId === "string" ? data.jobId.trim() : "";
+      const kind = data.kind === "recommend" || data.kind === "plan" ? data.kind : "";
+      if (!jobId) {
+        ws.send(JSON.stringify({ type: "error", message: "jobId is required" }));
+        return;
+      }
+      stopJobPoller(ws, getJobSubscriptionKey(jobId, kind));
+      ws.send(JSON.stringify({ type: "job_unsubscribed", jobId, kind: kind || null }));
+      return;
+    }
+
     if (data.type === "message") {
       const sessionId = typeof data.sessionId === "string" ? data.sessionId : ws.sessionId;
       if (sessionId) {
@@ -2244,6 +2368,7 @@ wss.on("connection", (ws, request, user) => {
     if (ws.sessionId) {
       removeClientFromSession(ws.sessionId, ws);
     }
+    clearJobPollers(ws);
   });
 });
 

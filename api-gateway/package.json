@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
+    "test": "node tests/v2Routes.test.mjs",
     "baseline:offline": "node scripts/run_offline_baseline.js",
     "baseline:recompute": "node scripts/recompute_recommendation_baselines.js",
     "migrate:deploy": "node scripts/run_migrations.js",

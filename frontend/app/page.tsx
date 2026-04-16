@@ -1,6 +1,16 @@
 "use client";
 
-import { FormEvent, MouseEvent as ReactMouseEvent, Suspense, TouchEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  Suspense,
+  TouchEvent,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { AppSidebar } from "@/components/layout/AppSidebar";
@@ -10,7 +20,7 @@ import { TripPanel } from "@/components/trip/TripPanel";
 import { VideoPlayerModal } from "@/components/video/VideoPanel";
 import { Tabs } from "@/components/ui/tabs";
 import { Modal, ModalHeader, ModalBody } from "@/components/ui/modal";
-import { MessageCircle, Search, Heart, Map as MapIcon } from "lucide-react";
+import { Film, MessageCircle, Search, Heart, Map as MapIcon, Mic } from "lucide-react";
 import {
   API_BASE_URL,
   getAccessToken,
@@ -22,7 +32,19 @@ import {
   STORAGE_ACTIVE_ITINERARY_ID,
   STORAGE_LAST_AUTH_USER_ID,
 } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { normalizeRecommendedVideos } from "@/lib/recommendedVideos";
+import {
+  getPlanJobV2,
+  getRecommendJobV2,
+  parseVoiceIntentV2,
+  planFromIntentV2,
+  recommendVideosV2,
+  type PlanResponseV2,
+  type RecommendResultV2,
+  type RenderableItemV2,
+  type VoiceIntentV2
+} from "@/lib/v2";
 
 type ContentTab = "chat" | "search" | "saved" | "itinerary";
 type TransportMode = "drive" | "transit" | "walk" | "bike";
@@ -176,11 +198,24 @@ type SpeechRecognitionLike = {
 };
 
 type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
+type VoiceCaptureSource = "chat" | "map";
+type VoiceAutoPipelineState =
+  | "idle"
+  | "listening"
+  | "parsing"
+  | "recommending"
+  | "planning"
+  | "completed"
+  | "error";
+type PanelRestoreState = {
+  activePanel: ContentTab;
+};
 
 declare global {
   interface Window {
     google?: typeof google;
     __googleMapsScriptLoadingPromise?: Promise<typeof google>;
+    __googleMapsRoutesLibPromise?: Promise<unknown>;
   }
 }
 
@@ -213,7 +248,7 @@ type DayPlan = {
 
 type ChatItineraryPlanSlot = {
   place_name?: string;
-  segment_id?: number | null;
+  segment_id?: number | string | null;
   travel_mode?: string;
   lat?: number | null;
   lng?: number | null;
@@ -230,6 +265,8 @@ type ChatItineraryPlanPayload = {
   warnings?: string[];
   feasible?: boolean;
 };
+
+type V2AsyncAccepted = { jobId: string; pollAfterMs?: number; traceId?: string };
 
 type PlannerState = {
   days: DayPlan[];
@@ -422,10 +459,10 @@ function createSessionId(): string {
 
 async function ensureGoogleMapsLibraries(googleApi: typeof google): Promise<typeof google> {
   const mapsNs = googleApi.maps;
-  if (typeof mapsNs.importLibrary === "function") {
+  // 僅在傳統 bootstrap 尚未掛上 Map 時才 importLibrary("maps")。勿再對 places/routes 呼叫 importLibrary，
+  // 否則會與網址列上的 libraries=places,routes 重複載入，造成 gmp-* 自訂元素與 main.js 重複註冊。
+  if (typeof mapsNs.Map !== "function" && typeof mapsNs.importLibrary === "function") {
     const mapsLib = (await mapsNs.importLibrary("maps")) as { Map?: typeof google.maps.Map };
-    await mapsNs.importLibrary("places");
-    await mapsNs.importLibrary("routes");
     if (typeof mapsLib.Map === "function" && typeof mapsNs.Map !== "function") {
       (mapsNs as unknown as { Map: typeof google.maps.Map }).Map = mapsLib.Map;
     }
@@ -460,6 +497,36 @@ function buildGoogleMapInstance(
   }
 }
 
+function applyGoogleMap3DView(map: google.maps.Map, enabled: boolean): boolean {
+  const g = typeof window !== "undefined" ? window.google : undefined;
+  if (!g?.maps?.MapTypeId) {
+    return false;
+  }
+  const mapWithView = map as google.maps.Map & {
+    setTilt?: (value: number) => void;
+    getTilt?: () => number;
+    setHeading?: (value: number) => void;
+  };
+  if (!mapWithView.setTilt || !mapWithView.setHeading) {
+    return false;
+  }
+  try {
+    if (enabled) {
+      // 純 roadmap 常無法維持傾斜；切到混合圖層才能穩定呈現傾斜視角。
+      map.setMapTypeId(g.maps.MapTypeId.HYBRID);
+      mapWithView.setHeading(25);
+      mapWithView.setTilt(45);
+    } else {
+      map.setMapTypeId(g.maps.MapTypeId.ROADMAP);
+      mapWithView.setHeading(0);
+      mapWithView.setTilt(0);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function loadGoogleMapsApi(): Promise<typeof google> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("Google Maps 僅能在瀏覽器環境使用。"));
@@ -472,6 +539,52 @@ function loadGoogleMapsApi(): Promise<typeof google> {
   }
   if (!GOOGLE_MAPS_API_KEY) {
     return Promise.reject(new Error("缺少 NEXT_PUBLIC_GOOGLE_MAPS_API_KEY。"));
+  }
+
+  const existing = document.querySelector(
+    "script[src*='maps.googleapis.com/maps/api/js']"
+  ) as HTMLScriptElement | null;
+  if (existing) {
+    const loadingPromise = new Promise<typeof google>((resolve, reject) => {
+      let started = false;
+      const finish = () => {
+        if (started) {
+          return;
+        }
+        started = true;
+        void (async () => {
+          try {
+            const g = window.google;
+            if (!g?.maps) {
+              reject(new Error("Google Maps 載入失敗。"));
+              return;
+            }
+            const ready = await ensureGoogleMapsLibraries(g);
+            resolve(ready);
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
+        })();
+      };
+      if (window.google?.maps?.Map) {
+        finish();
+        return;
+      }
+      existing.addEventListener("load", finish, { once: true });
+      existing.addEventListener("error", () => reject(new Error("Google Maps 腳本載入失敗。")), {
+        once: true
+      });
+      void Promise.resolve().then(() => {
+        if (window.google?.maps?.Map) {
+          finish();
+        }
+      });
+    });
+    window.__googleMapsScriptLoadingPromise = loadingPromise;
+    void loadingPromise.catch(() => {
+      window.__googleMapsScriptLoadingPromise = undefined;
+    });
+    return loadingPromise;
   }
 
   const loadingPromise = new Promise<typeof google>((resolve, reject) => {
@@ -588,6 +701,45 @@ function escapeHtml(input: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function extractDestinationQueryFromVoice(raw: string): string {
+  const text = raw.replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "";
+  }
+  const compact = text.replace(/[。！？!?]/g, " ").trim();
+  const patterns: RegExp[] = [
+    /(?:我想去|我要去|想去|帶我去|幫我去|前往|去|到)\s*(.+)$/i,
+    /(?:take me to|go to|travel to)\s+(.+)$/i,
+    /(?:find|search)\s+(.+)$/i
+  ];
+  for (const pattern of patterns) {
+    const match = compact.match(pattern);
+    const candidate = match?.[1]?.trim();
+    if (candidate) {
+      return candidate.replace(/^(一下|一下下)\s*/i, "").trim();
+    }
+  }
+  return compact;
+}
+
+function isAsyncAccepted(value: unknown): value is V2AsyncAccepted {
+  return Boolean(value && typeof value === "object" && "jobId" in value);
+}
+
+function isCompletedResponse<T>(value: unknown): value is { status?: "completed"; result?: T; traceId?: string } {
+  return Boolean(value && typeof value === "object" && "result" in value);
+}
+
+function stableVideoIdFromYoutube(youtubeId: string): number {
+  if (!youtubeId) return 0;
+  let hash = 0;
+  for (let i = 0; i < youtubeId.length; i += 1) {
+    hash = (hash * 31 + youtubeId.charCodeAt(i)) | 0;
+  }
+  const n = Math.abs(hash);
+  return n === 0 ? 1 : n;
+}
+
 function HomePageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -597,6 +749,19 @@ function HomePageInner() {
   const [searchText, setSearchText] = useState("");
   const [mapActionError, setMapActionError] = useState<string | null>(null);
   const [mapSearchResults, setMapSearchResults] = useState<MapSearchResult[]>([]);
+  const [mapVoiceHint, setMapVoiceHint] = useState<string>("按下語音鍵後說出想去的地點");
+  const [mapVoiceTranscript, setMapVoiceTranscript] = useState("");
+  const [mapVoiceProcessing, setMapVoiceProcessing] = useState(false);
+  const [voiceAutoPipelineState, setVoiceAutoPipelineState] = useState<VoiceAutoPipelineState>("idle");
+  const [mapVoiceTraceId, setMapVoiceTraceId] = useState("");
+  const [mapVoiceIntent, setMapVoiceIntent] = useState<VoiceIntentV2 | null>(null);
+  const [mapV2Recommendations, setMapV2Recommendations] = useState<RenderableItemV2[]>([]);
+  const [mapV2UnmappedSegments, setMapV2UnmappedSegments] = useState<RenderableItemV2[]>([]);
+  /** 地圖右側滑出面板：行程規劃 | 推薦影片（同一時間最多開一個，點同一顆可關閉） */
+  const [mapRightDrawer, setMapRightDrawer] = useState<null | "itinerary" | "videos">(null);
+  const [panelRestoreState, setPanelRestoreState] = useState<PanelRestoreState | null>(null);
+  const [map3dEnabled, setMap3dEnabled] = useState(true);
+  const [map3dSupported, setMap3dSupported] = useState(true);
   const [mapSearchMode, setMapSearchMode] = useState<"center" | "global">("center");
   const [mapSearchRadiusKm, setMapSearchRadiusKm] = useState(25);
   const mapSearchRadiusKmRef = useRef(mapSearchRadiusKm);
@@ -638,6 +803,7 @@ function HomePageInner() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingSource, setRecordingSource] = useState<VoiceCaptureSource | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [authEmail, setAuthEmail] = useState("");
   const [profile, setProfile] = useState<UserProfile>({});
@@ -659,19 +825,17 @@ function HomePageInner() {
   const [activeItineraryId, setActiveItineraryId] = useState<number | null>(null);
   const [playerVideo, setPlayerVideo] = useState<RecommendedVideo | null>(null);
   const [playerStartSec, setPlayerStartSec] = useState(0);
-  const [primaryTab, setPrimaryTab] = useState<ContentTab>("chat");
-  const [secondaryTab, setSecondaryTab] = useState<ContentTab | null>(null);
+  /** null：全幅顯示地圖與語音；非 null：左側為該面板、右側為地圖 */
+  const [activePanel, setActivePanel] = useState<ContentTab | null>(null);
   const [tripPanelTab, setTripPanelTab] = useState("itinerary");
-  const [splitRatio, setSplitRatio] = useState(0.5);
-  const [splitDragging, setSplitDragging] = useState(false);
-  const splitDragRef = useRef<{ startX: number; startRatio: number; width: number } | null>(null);
-  const centerSplitContainerRef = useRef<HTMLDivElement>(null);
   const [searchAddMenuResultId, setSearchAddMenuResultId] = useState<string | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const speechBaseInputRef = useRef("");
+  const voiceCaptureSourceRef = useRef<VoiceCaptureSource>("chat");
+  const mapVoiceTranscriptRef = useRef("");
   const wsRef = useRef<WebSocket | null>(null);
   const streamingViaSseRef = useRef(false);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -679,6 +843,7 @@ function HomePageInner() {
   const googleMapRef = useRef<google.maps.Map | null>(null);
   const mapClickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const markerRefs = useRef<Map<string, google.maps.Marker>>(new Map());
+  const v2MarkerRefs = useRef<Map<string, google.maps.Marker>>(new Map());
   const searchResultMarkersRef = useRef<google.maps.Marker[]>([]);
   const routePolylinesRef = useRef<google.maps.Polyline[]>([]);
   const placesServiceRef = useRef<google.maps.places.PlacesService | null>(null);
@@ -688,11 +853,6 @@ function HomePageInner() {
   const streetViewServiceRef = useRef<google.maps.StreetViewService | null>(null);
   const locationSyncOnceRef = useRef(false);
   const itineraryTouchStartXRef = useRef<number | null>(null);
-
-  const mapColumnVisible = useMemo(
-    () => (primaryTab === "search" && secondaryTab === null) || secondaryTab === "search",
-    [primaryTab, secondaryTab]
-  );
 
   useEffect(() => {
     if (!authReady) {
@@ -731,7 +891,6 @@ function HomePageInner() {
 
   const state = history[historyIndex];
   const selectedDay = state.days.find((day) => day.id === state.selectedDayId) ?? state.days[0];
-  const selectedPlace = places.find((item) => item.id === selectedPlaceId);
 
   const itineraryContentKey = useMemo(
     () =>
@@ -769,6 +928,16 @@ function HomePageInner() {
   const mapPlaces = useMemo(
     () => places.filter((item) => usedOrRecommendedIds.has(item.id)),
     [usedOrRecommendedIds]
+  );
+  const mapV2RenderablePins = useMemo(
+    () =>
+      mapV2Recommendations.filter(
+        (item) =>
+          item.geocodeStatus === "ok" &&
+          typeof item.lat === "number" &&
+          typeof item.lng === "number"
+      ),
+    [mapV2Recommendations]
   );
 
   const selectedDayPlaces = selectedDay.placeIds
@@ -1261,6 +1430,219 @@ function HomePageInner() {
     renderSearchResultsOnMap(finalResults, map, googleApi);
   }
 
+  function mapV2ItemsToRecommendedVideos(items: RenderableItemV2[]): RecommendedVideo[] {
+    const grouped = new Map<string, RecommendedVideo>();
+    items.forEach((item, idx) => {
+      const youtubeId = String(item.youtubeId || "").trim();
+      if (!youtubeId) return;
+      const key = youtubeId;
+      const existing = grouped.get(key);
+      const startSec = Math.max(0, Number(item.startSec || 0));
+      const endSec = Math.max(startSec, Number(item.endSec || startSec + 30));
+      const segmentSummary = (item.reason || []).filter(Boolean).slice(0, 2).join(" / ")
+        || item.placeName
+        || item.videoTitle
+        || "";
+      const segment: RecommendedSegment = {
+        segment_id: idx + 1,
+        start_sec: startSec,
+        end_sec: endSec,
+        summary: segmentSummary,
+        city: item.placeName || undefined
+      };
+      if (!existing) {
+        grouped.set(key, {
+          video_id: stableVideoIdFromYoutube(youtubeId),
+          youtube_id: youtubeId,
+          title: item.videoTitle || item.placeName || "Recommended video",
+          city: item.placeName || undefined,
+          thumbnail_url: `https://i.ytimg.com/vi/${youtubeId}/mqdefault.jpg`,
+          summary: item.placeName || "",
+          segments: [segment],
+          recommendation_reasons: item.reason || [],
+          rank_position: grouped.size + 1,
+          rank_score: undefined,
+          source: "v2"
+        });
+      } else {
+        existing.segments.push(segment);
+      }
+    });
+    return Array.from(grouped.values());
+  }
+
+  function planDaysFromV2(plan: PlanResponseV2["plan"]): ChatItineraryPlanPayload {
+    return {
+      feasible: plan.feasible,
+      warnings: plan.warnings || [],
+      days: (plan.days || []).map((day, dayIdx) => ({
+        day_number: Number(day.dayNumber || dayIdx + 1),
+        date_label: `Day ${Number(day.dayNumber || dayIdx + 1)}`,
+        slots: (day.stops || []).map((stop) => ({
+          place_name: stop.placeName || "Unnamed stop",
+          segment_id: stop.segmentId || null,
+          travel_mode: stop.travelMode || undefined,
+          lat: stop.lat ?? null,
+          lng: stop.lng ?? null
+        }))
+      }))
+    };
+  }
+
+  function buildV2VoiceSummary(intent: VoiceIntentV2, recCount: number, plan: PlanResponseV2["plan"]): string {
+    const destination = intent.destination || "未指定目的地";
+    const days = intent.days || 3;
+    const dayCount = plan.days?.length || 0;
+    const firstStop = plan.days?.[0]?.stops?.[0]?.placeName || "尚未產生";
+    const warningText = (plan.warnings || []).slice(0, 2).join("；");
+    return [
+      `已為你完成 ${destination} 的 ${days} 天旅遊規劃。`,
+      `共推薦 ${recCount} 個影片片段地點，並已同步標示在地圖上。`,
+      `行程目前有 ${dayCount} 天，第一站：${firstStop}。`,
+      warningText ? `提醒：${warningText}` : ""
+    ].filter(Boolean).join("\n");
+  }
+
+  async function waitRecommendJobResult(jobId: string, pollAfterMs = 1200): Promise<RecommendResultV2 | null> {
+    const maxRound = 30;
+    for (let round = 0; round < maxRound; round += 1) {
+      const status = await getRecommendJobV2(jobId);
+      if (status.status === "completed" && status.result && typeof status.result === "object") {
+        return status.result as RecommendResultV2;
+      }
+      if (status.status === "failed") {
+        throw new Error("推薦任務失敗，請稍後再試。");
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.max(500, pollAfterMs)));
+    }
+    throw new Error("推薦任務逾時，請稍後再試。");
+  }
+
+  async function waitPlanJobResult(jobId: string, pollAfterMs = 1200): Promise<PlanResponseV2 | null> {
+    const maxRound = 30;
+    for (let round = 0; round < maxRound; round += 1) {
+      const status = await getPlanJobV2(jobId);
+      if (status.status === "completed" && status.result && typeof status.result === "object") {
+        return status.result as PlanResponseV2;
+      }
+      if (status.status === "failed") {
+        throw new Error("行程規劃任務失敗，請稍後再試。");
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.max(500, pollAfterMs)));
+    }
+    throw new Error("行程規劃任務逾時，請稍後再試。");
+  }
+
+  async function runMapVoiceCommand(transcript: string): Promise<void> {
+    const normalizedTranscript = transcript.trim();
+    if (!normalizedTranscript) {
+      setMapVoiceHint("沒有辨識到內容，請再試一次");
+      return;
+    }
+    setMapVoiceProcessing(true);
+    setMapActionError(null);
+    setMapVoiceTranscript(normalizedTranscript);
+    setMapV2UnmappedSegments([]);
+    setVoiceAutoPipelineState("parsing");
+    setMapVoiceHint("正在解析需求...");
+    try {
+      const parsed = await parseVoiceIntentV2(normalizedTranscript);
+      const destination = parsed.destination || extractDestinationQueryFromVoice(normalizedTranscript);
+      const nextIntent: VoiceIntentV2 = {
+        ...parsed,
+        destination,
+        days: parsed.days || 3
+      };
+      setMapVoiceIntent(nextIntent);
+      setMapVoiceTraceId(nextIntent.traceId || "");
+
+      setVoiceAutoPipelineState("recommending");
+      setMapVoiceHint("正在推薦影片與景點...");
+      const recommendResponse = await recommendVideosV2({
+        query: normalizedTranscript,
+        destination: nextIntent.destination,
+        days: nextIntent.days,
+        budget: nextIntent.budget,
+        preferences: nextIntent.preferences,
+        limit: 12,
+        traceId: nextIntent.traceId || undefined
+      });
+
+      let recommendResult: RecommendResultV2 | null = null;
+      if (isAsyncAccepted(recommendResponse)) {
+        recommendResult = await waitRecommendJobResult(recommendResponse.jobId, recommendResponse.pollAfterMs || 1200);
+      } else if (isCompletedResponse<RecommendResultV2>(recommendResponse)) {
+        recommendResult = recommendResponse.result || null;
+      }
+      if (!recommendResult) {
+        throw new Error("推薦結果為空，請稍後再試。");
+      }
+      const recommendationItems = Array.isArray(recommendResult.items) ? recommendResult.items : [];
+      setMapV2Recommendations(recommendationItems);
+      setSearchText(nextIntent.destination || "");
+      setRecommendedVideos(mapV2ItemsToRecommendedVideos(recommendationItems));
+      setLastRecommendationQuery(normalizedTranscript);
+
+      setVoiceAutoPipelineState("planning");
+      setMapVoiceHint("正在生成行程...");
+      const planResponse = await planFromIntentV2({
+        query: normalizedTranscript,
+        destination: nextIntent.destination,
+        days: nextIntent.days,
+        budget: nextIntent.budget,
+        preferences: nextIntent.preferences,
+        limit: 18,
+        traceId: nextIntent.traceId || undefined
+      });
+      let planResult: PlanResponseV2 | null = null;
+      if (isAsyncAccepted(planResponse)) {
+        planResult = await waitPlanJobResult(planResponse.jobId, planResponse.pollAfterMs || 1200);
+      } else if (isCompletedResponse<PlanResponseV2>(planResponse)) {
+        planResult = planResponse.result || null;
+      }
+      if (!planResult) {
+        throw new Error("行程結果為空，請稍後再試。");
+      }
+
+      const nextRecommendations = Array.isArray(planResult.recommendations) ? planResult.recommendations : recommendationItems;
+      setMapV2Recommendations(nextRecommendations);
+      setMapV2UnmappedSegments(Array.isArray(planResult.plan?.unmappedSegments) ? planResult.plan.unmappedSegments : []);
+      applyItineraryPlanFromChat(planDaysFromV2(planResult.plan));
+      setRecommendedVideos(mapV2ItemsToRecommendedVideos(nextRecommendations));
+
+      const summary = buildV2VoiceSummary(nextIntent, nextRecommendations.length, planResult.plan);
+      setChatMessages((prev) =>
+        trimChatMessages(
+          [...prev, { role: "user", content: normalizedTranscript }, { role: "assistant", content: summary }],
+          CHAT_MEMORY_LIMIT + 1
+        )
+      );
+      setVoiceAutoPipelineState("completed");
+      setMapVoiceHint("已完成：地圖插針、影片推薦與行程規劃");
+    } catch (error) {
+      const text = error instanceof Error ? error.message : "語音流程失敗，請稍後再試。";
+      setVoiceAutoPipelineState("error");
+      setMapActionError(text);
+      setMapVoiceHint(text);
+    } finally {
+      setMapVoiceProcessing(false);
+    }
+  }
+
+  function handleMapVoiceButtonClick() {
+    if (mapVoiceProcessing) {
+      return;
+    }
+    if (isRecording && recordingSource === "map") {
+      stopVoiceInput();
+      return;
+    }
+    if (isRecording) {
+      return;
+    }
+    startVoiceInput("map");
+  }
+
   async function onMapSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const q = searchText.trim();
@@ -1276,15 +1658,7 @@ function HomePageInner() {
       return;
     }
     setSearchText(q);
-    if (!mapColumnVisible) {
-      if (primaryTab === "search" && secondaryTab === "itinerary") {
-        setSecondaryTab(null);
-      } else if (primaryTab === "itinerary" && secondaryTab === null) {
-        setSecondaryTab("search");
-      } else if (primaryTab !== "search") {
-        setSecondaryTab("search");
-      }
-    }
+    setActivePanel("search");
     void runMapSearchQuery(q);
   }
 
@@ -1300,21 +1674,84 @@ function HomePageInner() {
     }
     setLocatingCurrentPosition(true);
     setMapActionError(null);
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        map.panTo({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude
-        });
-        map.setZoom(14);
-        setLocatingCurrentPosition(false);
+
+    const geo = navigator.geolocation;
+    const opts: PositionOptions = {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 30000
+    };
+
+    let settled = false;
+    let watchId: number | undefined;
+    let deadlineId: ReturnType<typeof setTimeout> | undefined;
+    let best: GeolocationPosition | null = null;
+
+    const cleanup = () => {
+      if (watchId !== undefined) {
+        geo.clearWatch(watchId);
+      }
+      if (deadlineId !== undefined) {
+        clearTimeout(deadlineId);
+      }
+    };
+
+    const finish = (pos: GeolocationPosition) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      const { latitude, longitude, accuracy } = pos.coords;
+      map.panTo({ lat: latitude, lng: longitude });
+      const zoom = accuracy <= 35 ? 17 : accuracy <= 100 ? 16 : 15;
+      map.setZoom(zoom);
+      setLocatingCurrentPosition(false);
+    };
+
+    const fail = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      setLocatingCurrentPosition(false);
+      setMapActionError("無法取得目前位置，請確認定位權限已開啟。");
+    };
+
+    const tryGetCurrent = () => {
+      geo.getCurrentPosition(
+        (pos) => finish(pos),
+        () => fail(),
+        opts
+      );
+    };
+
+    watchId = geo.watchPosition(
+      (pos) => {
+        if (!best || pos.coords.accuracy < best.coords.accuracy) {
+          best = pos;
+        }
+        if (pos.coords.accuracy > 0 && pos.coords.accuracy <= 45) {
+          finish(pos);
+        }
       },
       () => {
-        setLocatingCurrentPosition(false);
-        setMapActionError("無法取得目前位置，請確認定位權限已開啟。");
+        tryGetCurrent();
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      opts
     );
+
+    deadlineId = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      if (best) {
+        finish(best);
+      } else {
+        tryGetCurrent();
+      }
+    }, 12000);
   }
 
   function focusSearchResult(result: MapSearchResult) {
@@ -1342,65 +1779,126 @@ function HomePageInner() {
     }
   }
 
-  useEffect(() => {
-    if (!authReady || !mapColumnVisible) {
-      return;
-    }
-    if (!mapContainerRef.current) {
+  useLayoutEffect(() => {
+    if (!authReady) {
       return;
     }
     const markers = markerRefs.current;
+    const v2Markers = v2MarkerRefs.current;
     let alive = true;
-    void (async () => {
-      async function initOnce(): Promise<void> {
-        const googleApi = await loadGoogleMapsApi();
-        if (!alive || !mapContainerRef.current) {
-          return;
+    let rafId: number | null = null;
+    let waitAttempts = 0;
+    const MAX_REF_WAIT_FRAMES = 90;
+
+    const runAsyncInit = () => {
+      void (async () => {
+        async function waitForMapContainer(maxAttempts: number): Promise<HTMLDivElement | null> {
+          for (let i = 0; i < maxAttempts; i += 1) {
+            if (!alive) {
+              return null;
+            }
+            const el = mapContainerRef.current;
+            if (el) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 2 && rect.height > 2) {
+                return el;
+              }
+            }
+            await new Promise<void>((resolve) => {
+              requestAnimationFrame(() => resolve());
+            });
+          }
+          const last = mapContainerRef.current;
+          if (last) {
+            const r = last.getBoundingClientRect();
+            if (r.width > 2 && r.height > 2) {
+              return last;
+            }
+          }
+          return null;
         }
-        const cloudMapId = (process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || "").trim();
-        const map = buildGoogleMapInstance(googleApi, mapContainerRef.current, cloudMapId);
-        googleMapRef.current = map;
-        mapClickListenerRef.current = map.addListener("click", () => setSelectedPlaceId(null));
-        setMapReady(true);
-      }
-      try {
-        setMapError(null);
-        await initOnce();
-      } catch (error) {
-        if (!alive) {
-          return;
-        }
-        window.__googleMapsScriptLoadingPromise = undefined;
-        try {
-          await initOnce();
-        } catch (err2) {
+
+        async function initOnce(): Promise<void> {
+          const googleApi = await loadGoogleMapsApi();
           if (!alive) {
             return;
           }
-          const text = err2 instanceof Error ? err2.message : "Google Maps 初始化失敗。";
-          setMapError(text);
+          const container = await waitForMapContainer(120);
+          if (!alive) {
+            return;
+          }
+          if (!container) {
+            throw new Error("地圖容器尚未就緒。");
+          }
+          const cloudMapId = (process.env.NEXT_PUBLIC_GOOGLE_MAP_ID || "").trim();
+          const map = buildGoogleMapInstance(googleApi, container, cloudMapId);
+          googleMapRef.current = map;
+          mapClickListenerRef.current = map.addListener("click", () => setSelectedPlaceId(null));
+          setMapReady(true);
         }
+        try {
+          setMapError(null);
+          await initOnce();
+        } catch (error) {
+          if (!alive) {
+            return;
+          }
+          window.__googleMapsScriptLoadingPromise = undefined;
+          try {
+            await initOnce();
+          } catch (err2) {
+            if (!alive) {
+              return;
+            }
+            const text = err2 instanceof Error ? err2.message : "Google Maps 初始化失敗。";
+            setMapError(text);
+          }
+        }
+      })();
+    };
+
+    const waitForContainerThenInit = () => {
+      if (!alive) {
+        return;
       }
-    })();
+      if (mapContainerRef.current) {
+        runAsyncInit();
+        return;
+      }
+      waitAttempts += 1;
+      if (waitAttempts > MAX_REF_WAIT_FRAMES) {
+        setMapError("地圖容器尚未就緒，請重新整理頁面。");
+        return;
+      }
+      rafId = requestAnimationFrame(waitForContainerThenInit);
+    };
+
+    waitForContainerThenInit();
+
     return () => {
       alive = false;
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
       mapClickListenerRef.current?.remove();
       mapClickListenerRef.current = null;
       routePolylinesRef.current.forEach((p) => p.setMap(null));
       routePolylinesRef.current = [];
       markers.forEach((marker) => marker.setMap(null));
       markers.clear();
+      v2Markers.forEach((marker) => marker.setMap(null));
+      v2Markers.clear();
       clearSearchResultMarkers();
       placesServiceRef.current = null;
       googleMapRef.current = null;
       setMapReady(false);
     };
-  }, [authReady, mapColumnVisible]);
+  }, [authReady, activePanel]);
 
   useEffect(() => {
     const map = googleMapRef.current;
     const g = window.google;
-    if (!mapReady || !mapColumnVisible || !map || !g?.maps?.event) {
+    if (!mapReady || !map || !g?.maps?.event) {
       return;
     }
     const id = window.setTimeout(() => {
@@ -1411,7 +1909,19 @@ function HomePageInner() {
       }
     }, 50);
     return () => window.clearTimeout(id);
-  }, [mapReady, mapColumnVisible]);
+  }, [mapReady, activePanel]);
+
+  useEffect(() => {
+    const map = googleMapRef.current;
+    if (!mapReady || !map) {
+      return;
+    }
+    const ok = applyGoogleMap3DView(map, map3dEnabled);
+    setMap3dSupported(ok);
+    if (map3dEnabled && !ok) {
+      setMapActionError("目前地圖無法切換傾斜視角。");
+    }
+  }, [map3dEnabled, mapReady]);
 
   useEffect(() => {
     const map = googleMapRef.current;
@@ -1455,6 +1965,56 @@ function HomePageInner() {
     if (!map || !googleApi?.maps) {
       return;
     }
+    const nextIds = new Set(
+      mapV2RenderablePins.map((item) => `${item.segmentId || "segment"}:${item.internalPlaceId || item.placeName || "place"}`)
+    );
+    v2MarkerRefs.current.forEach((marker, key) => {
+      if (!nextIds.has(key)) {
+        marker.setMap(null);
+        v2MarkerRefs.current.delete(key);
+      }
+    });
+
+    mapV2RenderablePins.forEach((item, index) => {
+      const key = `${item.segmentId || "segment"}:${item.internalPlaceId || item.placeName || "place"}`;
+      if (v2MarkerRefs.current.has(key)) {
+        return;
+      }
+      const marker = new googleApi.maps.Marker({
+        map,
+        position: { lat: Number(item.lat), lng: Number(item.lng) },
+        title: item.placeName || item.videoTitle || "Recommended place",
+        label: String(index + 1),
+        icon: {
+          path: googleApi.maps.SymbolPath.CIRCLE,
+          fillColor: "#1B4965",
+          fillOpacity: 0.95,
+          strokeColor: "#ffffff",
+          strokeWeight: 2,
+          scale: 8
+        }
+      });
+      marker.addListener("click", () => {
+        setMapVoiceHint(
+          `${item.placeName || item.videoTitle || "推薦地點"} (${Math.max(0, Number(item.startSec || 0))}s - ${Math.max(0, Number(item.endSec || 0))}s)`
+        );
+      });
+      v2MarkerRefs.current.set(key, marker);
+    });
+
+    if (mapV2RenderablePins.length > 0) {
+      const bounds = new googleApi.maps.LatLngBounds();
+      mapV2RenderablePins.forEach((item) => bounds.extend({ lat: Number(item.lat), lng: Number(item.lng) }));
+      map.fitBounds(bounds, 80);
+    }
+  }, [mapV2RenderablePins]);
+
+  useEffect(() => {
+    const map = googleMapRef.current;
+    const googleApi = window.google;
+    if (!map || !googleApi?.maps) {
+      return;
+    }
 
     const clearRoutePolylines = () => {
       routePolylinesRef.current.forEach((p) => p.setMap(null));
@@ -1470,7 +2030,10 @@ function HomePageInner() {
 
     void (async () => {
       try {
-        const routesLib = (await googleApi.maps.importLibrary("routes")) as {
+        if (!window.__googleMapsRoutesLibPromise) {
+          window.__googleMapsRoutesLibPromise = googleApi.maps.importLibrary("routes");
+        }
+        const routesLib = (await window.__googleMapsRoutesLibPromise) as {
           Route?: {
             computeRoutes: (req: unknown) => Promise<{
               routes?: Array<{ createPolylines: () => google.maps.Polyline[] }>;
@@ -1945,7 +2508,7 @@ function HomePageInner() {
           }
         },
         () => resolve(),
-        { enableHighAccuracy: true, timeout: 8000 }
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
       );
     });
   }
@@ -1986,6 +2549,19 @@ function HomePageInner() {
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.onresult = (event) => {
+      if (voiceCaptureSourceRef.current === "map") {
+        let line = "";
+        for (let i = 0; i < event.results.length; i += 1) {
+          line += event.results[i][0]?.transcript ?? "";
+        }
+        const trimmed = line.trim();
+        mapVoiceTranscriptRef.current = trimmed;
+        setMapVoiceTranscript(trimmed);
+        if (trimmed) {
+          setMapVoiceHint(`聆聽中：${trimmed}`);
+        }
+        return;
+      }
       let transcript = "";
       for (let i = 0; i < event.results.length; i += 1) {
         transcript += event.results[i][0]?.transcript ?? "";
@@ -1994,9 +2570,30 @@ function HomePageInner() {
     };
     recognition.onend = () => {
       setIsRecording(false);
+      const source = voiceCaptureSourceRef.current;
+      const finalTranscript = mapVoiceTranscriptRef.current.trim();
+      voiceCaptureSourceRef.current = "chat";
+      setRecordingSource(null);
+      if (source === "map") {
+        if (!finalTranscript) {
+          setMapVoiceHint("沒有辨識到內容，請再試一次");
+          setVoiceAutoPipelineState("idle");
+          return;
+        }
+        void runMapVoiceCommand(finalTranscript);
+      }
     };
     recognition.onerror = () => {
       setIsRecording(false);
+      const source = voiceCaptureSourceRef.current;
+      voiceCaptureSourceRef.current = "chat";
+      setRecordingSource(null);
+      if (source === "map") {
+        setMapVoiceHint("語音辨識失敗，請再試一次");
+        setMapActionError("語音辨識失敗，請再試一次。");
+        setVoiceAutoPipelineState("error");
+        return;
+      }
       setChatError("語音辨識失敗，請再試一次。");
     };
 
@@ -2012,8 +2609,11 @@ function HomePageInner() {
       } catch {
         // Ignore stop errors during unmount.
       }
+      voiceCaptureSourceRef.current = "chat";
       speechRecognitionRef.current = null;
     };
+    // SpeechRecognition instance should be initialized only once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function commit(mutator: (draft: PlannerState) => void) {
@@ -2250,7 +2850,7 @@ function HomePageInner() {
         }
         if (activeItineraryId) {
           await loadSavedItinerary(activeItineraryId);
-          setSecondaryTab("itinerary");
+          setActivePanel("itinerary");
           gotItineraryPlan = true;
           return;
         }
@@ -2265,7 +2865,7 @@ function HomePageInner() {
         const latestId = Number(latest?.id || 0);
         if (Number.isFinite(latestId) && latestId > 0) {
           await loadSavedItinerary(latestId);
-          setSecondaryTab("itinerary");
+          setActivePanel("itinerary");
           gotItineraryPlan = true;
         }
       }
@@ -2455,7 +3055,7 @@ function HomePageInner() {
           }
         }
         if (!gotItineraryPlan) {
-          setSecondaryTab("itinerary");
+          setActivePanel("itinerary");
         }
       } catch (error) {
         const text = error instanceof Error ? error.message : "聊天服務暫時無法使用，請稍後再試。";
@@ -2662,8 +3262,7 @@ function HomePageInner() {
     if (srcDays.length === 0) {
       return;
     }
-    setPrimaryTab("chat");
-    setSecondaryTab("itinerary");
+    setActivePanel("itinerary");
     const nextTransport: Record<string, TransportMode> = {};
     const newDays: DayPlan[] = srcDays.map((day, dayIdx) => {
       const dayId = `day${dayIdx + 1}`;
@@ -3064,22 +3663,48 @@ function HomePageInner() {
     });
   }
 
-  function startVoiceInput() {
-    if (chatLoading || isRecording) {
+  function startVoiceInput(source: VoiceCaptureSource = "chat") {
+    if ((source === "chat" && chatLoading) || isRecording) {
       return;
     }
     if (!speechSupported || !speechRecognitionRef.current) {
-      setChatError("目前瀏覽器不支援語音輸入。");
+      if (source === "map") {
+        setMapVoiceHint("目前瀏覽器不支援語音輸入");
+      } else {
+        setChatError("目前瀏覽器不支援語音輸入。");
+      }
       return;
     }
-    setChatError(null);
-    speechBaseInputRef.current = chatInput;
+    voiceCaptureSourceRef.current = source;
+    setRecordingSource(source);
+    const rec = speechRecognitionRef.current;
+    if (source === "map") {
+      rec.continuous = false;
+      rec.interimResults = true;
+      setMapActionError(null);
+      setMapVoiceTranscript("");
+      mapVoiceTranscriptRef.current = "";
+      setVoiceAutoPipelineState("listening");
+      setMapVoiceHint("正在聆聽，請說出想去的地點");
+      speechBaseInputRef.current = "";
+    } else {
+      rec.continuous = true;
+      rec.interimResults = true;
+      setChatError(null);
+      speechBaseInputRef.current = chatInput;
+    }
     try {
-      speechRecognitionRef.current.start();
+      rec.start();
       setIsRecording(true);
     } catch {
+      voiceCaptureSourceRef.current = "chat";
+      setRecordingSource(null);
       setIsRecording(false);
-      setChatError("無法啟動語音辨識，請稍後再試。");
+      if (source === "map") {
+        setMapVoiceHint("無法啟動語音辨識，請稍後再試");
+      } else {
+        setChatError("無法啟動語音辨識，請稍後再試。");
+      }
     }
   }
 
@@ -3090,6 +3715,8 @@ function HomePageInner() {
     try {
       speechRecognitionRef.current.stop();
     } catch {
+      voiceCaptureSourceRef.current = "chat";
+      setRecordingSource(null);
       setIsRecording(false);
     }
   }
@@ -3208,55 +3835,27 @@ function HomePageInner() {
     }
   }
 
+  function restorePanelFromMap() {
+    if (panelRestoreState) {
+      setActivePanel(panelRestoreState.activePanel);
+      setPanelRestoreState(null);
+    } else {
+      setActivePanel("chat");
+    }
+  }
+
   function handleContentTabChange(clicked: ContentTab) {
-    if (secondaryTab === null) {
-      if (primaryTab === "chat" && clicked !== "chat") {
-        setSecondaryTab(clicked);
-        return;
-      }
-      if (primaryTab === "search" && clicked === "itinerary") {
-        setSecondaryTab("itinerary");
-        return;
-      }
-      if (primaryTab === "itinerary" && clicked === "search") {
-        setSecondaryTab("search");
-        return;
-      }
-      if (primaryTab !== "chat" && clicked === "chat") {
-        setSecondaryTab(primaryTab);
-        setPrimaryTab("chat");
-        return;
-      }
-      setPrimaryTab(clicked);
+    if (activePanel === clicked) {
+      setPanelRestoreState({ activePanel: clicked });
+      setActivePanel(null);
       return;
     }
-    if (clicked === secondaryTab || clicked === primaryTab) {
-      setSecondaryTab(null);
-      return;
-    }
-    setPrimaryTab(clicked);
-    setSecondaryTab(null);
+    setActivePanel(clicked);
   }
 
   function openSearchForAddPlace() {
-    if (primaryTab === "chat" && secondaryTab === null) {
-      setSecondaryTab("search");
-      return;
-    }
-    if (primaryTab === "chat" && secondaryTab !== null) {
-      setSecondaryTab("search");
-      return;
-    }
-    if (primaryTab === "itinerary" && secondaryTab === null) {
-      setSecondaryTab("search");
-      return;
-    }
-    setPrimaryTab("search");
-    setSecondaryTab(null);
+    setActivePanel("search");
   }
-
-  const splitActive = secondaryTab !== null || primaryTab === "search";
-  const showRightColumn = secondaryTab !== null || primaryTab === "search";
 
   const contentTabItems = [
     { id: "chat" as const, label: "Chat", icon: <MessageCircle size={14} /> },
@@ -3264,50 +3863,6 @@ function HomePageInner() {
     { id: "saved" as const, label: "Saved", icon: <Heart size={14} /> },
     { id: "itinerary" as const, label: "Itinerary", icon: <MapIcon size={14} /> },
   ];
-
-  useEffect(() => {
-    if (!splitDragging) {
-      return;
-    }
-    document.body.classList.add("select-none");
-    const onMove = (e: MouseEvent) => {
-      const d = splitDragRef.current;
-      const container = centerSplitContainerRef.current;
-      if (!d || !container) {
-        return;
-      }
-      const w = container.getBoundingClientRect().width;
-      const delta = e.clientX - d.startX;
-      const next = d.startRatio + delta / w;
-      setSplitRatio(Math.min(0.75, Math.max(0.25, next)));
-    };
-    const onUp = () => {
-      splitDragRef.current = null;
-      setSplitDragging(false);
-      document.body.classList.remove("select-none");
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      document.body.classList.remove("select-none");
-    };
-  }, [splitDragging]);
-
-  function handleSplitMouseDown(e: ReactMouseEvent) {
-    e.preventDefault();
-    const container = centerSplitContainerRef.current;
-    if (!container) {
-      return;
-    }
-    splitDragRef.current = {
-      startX: e.clientX,
-      startRatio: splitRatio,
-      width: container.getBoundingClientRect().width,
-    };
-    setSplitDragging(true);
-  }
 
   function renderSearchPanel() {
     return (
@@ -3487,12 +4042,18 @@ function HomePageInner() {
   }
 
   function renderMapColumn() {
+    const pipelineText: Record<VoiceAutoPipelineState, string> = {
+      idle: "待命中",
+      listening: "聆聽中",
+      parsing: "解析需求",
+      recommending: "推薦景點",
+      planning: "產生行程",
+      completed: "完成",
+      error: "失敗"
+    };
     return (
-      <div className="relative min-h-0 flex-1">
-        <div
-          ref={mapContainerRef}
-          className={splitDragging ? "pointer-events-none h-full w-full" : "h-full w-full"}
-        />
+      <div className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden">
+        <div ref={mapContainerRef} className="min-h-0 w-full flex-1" />
         {mapError && (
           <div className="absolute left-3 top-3 rounded-lg border border-danger/20 bg-surface px-3 py-2 text-xs text-danger shadow-card">
             {mapError}
@@ -3504,81 +4065,196 @@ function HomePageInner() {
           </div>
         )}
 
-        {selectedPlace && (
-          <div
-            className="absolute right-3 top-3 w-[360px] max-w-[92%] rounded-2xl border border-border bg-surface p-4 text-sm shadow-modal animate-slide-up"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h3 className="text-base font-semibold text-primary">{selectedPlace.name}</h3>
-            <p className="mt-1 text-muted">{selectedPlace.intro}</p>
+        <div className="absolute left-3 top-3 z-30 flex max-w-[min(100%-6rem,280px)] flex-col gap-2 sm:max-w-[320px]">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="rounded-btn border border-border bg-surface/90 px-3 py-1.5 text-xs font-medium text-primary shadow-card backdrop-blur hover:bg-surface"
+              onClick={() => setMap3dEnabled((v) => !v)}
+              disabled={!mapReady}
+            >
+              {map3dEnabled ? "切換 2D" : "切換 3D"}
+            </button>
+            {!map3dSupported && map3dEnabled && (
+              <span className="rounded-btn border border-warning/40 bg-warning/10 px-3 py-1.5 text-[11px] text-warning shadow-card backdrop-blur">
+                傾斜視角可能受限
+              </span>
+            )}
+            {!!mapVoiceTraceId && (
+              <span className="rounded-btn border border-border bg-surface/90 px-3 py-1.5 text-[11px] text-muted shadow-card backdrop-blur">
+                trace: {mapVoiceTraceId}
+              </span>
+            )}
+          </div>
+        </div>
 
-            <div className="mt-3 space-y-1.5">
-              <div className="flex items-start gap-2 text-xs">
-                <span className="w-16 shrink-0 text-muted">Address</span>
-                <span className="text-primary">{selectedPlace.address}</span>
-              </div>
-              <div className="flex items-start gap-2 text-xs">
-                <span className="w-16 shrink-0 text-muted">Phone</span>
-                <span className="text-primary">{selectedPlace.phone}</span>
-              </div>
-              <div className="flex items-start gap-2 text-xs">
-                <span className="w-16 shrink-0 text-muted">Rating</span>
-                <span className="text-primary">{selectedPlace.rating}</span>
-              </div>
-              <div className="flex items-start gap-2 text-xs">
-                <span className="w-16 shrink-0 text-muted">Hours</span>
-                <span className="text-primary">{selectedPlace.hours}</span>
-              </div>
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {selectedPlace.reasons.map((reason) => (
-                <span key={reason} className="rounded-btn bg-surface-muted px-2.5 py-1 text-xs text-primary">
-                  {reason}
-                </span>
-              ))}
-            </div>
-
-            <div className="mt-3 flex flex-wrap gap-2">
-              <a
-                href={selectedPlace.website}
-                className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Website
-              </a>
+        <div className="absolute bottom-3 left-1/2 z-20 w-[380px] max-w-[min(95vw,380px)] -translate-x-1/2 rounded-2xl border border-border bg-surface/95 p-3 shadow-modal backdrop-blur">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">Voice Map Control</p>
+          <p className="mt-1 min-h-[34px] text-xs text-primary">{mapVoiceTranscript || mapVoiceHint}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted">
+            <span className="rounded-full bg-surface-muted px-2 py-0.5">流程：{pipelineText[voiceAutoPipelineState]}</span>
+            {mapVoiceIntent?.destination && (
+              <span className="rounded-full bg-surface-muted px-2 py-0.5">目的地：{mapVoiceIntent.destination}</span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className={
+                isRecording && recordingSource === "map"
+                  ? "inline-flex items-center gap-2 rounded-btn bg-danger px-3 py-1.5 text-xs font-semibold text-primary-foreground"
+                  : "inline-flex items-center gap-2 rounded-btn bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-60"
+              }
+              disabled={!speechSupported || !mapReady || mapVoiceProcessing}
+              onClick={handleMapVoiceButtonClick}
+            >
+              <Mic size={14} />
+              {isRecording && recordingSource === "map" ? "停止並定位" : "語音告訴 AI 去哪裡"}
+            </button>
+            <button
+              type="button"
+              className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium text-primary hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={locateCurrentPosition}
+              disabled={!mapReady || locatingCurrentPosition}
+            >
+              {locatingCurrentPosition ? "定位中..." : "定位目前位置"}
+            </button>
+            {activePanel === null && (
               <button
-                className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
                 type="button"
-                onClick={() => openStreetViewAt(selectedPlace.lat, selectedPlace.lng)}
+                className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium text-primary hover:bg-surface-muted"
+                onClick={restorePanelFromMap}
               >
-                Street View
+                還原面板
               </button>
-            </div>
+            )}
+          </div>
+        </div>
 
-            <div className="mt-3 border-t border-border pt-3">
-              <p className="mb-2 text-xs font-medium text-primary">Add to trip</p>
-              <div className="flex flex-wrap gap-1.5">
-                {state.days.map((day, idx) => (
-                  <button
-                    key={day.id}
-                    className="rounded-btn bg-surface-muted px-3 py-1.5 text-xs font-medium hover:bg-surface-hover transition-colors"
-                    onClick={() => addToDayOrPending(selectedPlace.id, day.id)}
-                  >
-                    Day {idx + 1}
-                  </button>
-                ))}
-                <button
-                  className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted transition-colors"
-                  onClick={() => addToDayOrPending(selectedPlace.id, "pending")}
-                >
-                  Queue
-                </button>
-              </div>
-            </div>
+        {mapV2UnmappedSegments.length > 0 && (
+          <div className="absolute left-3 top-16 z-20 max-w-[420px] rounded-xl border border-warning/30 bg-surface/95 px-3 py-2 text-xs text-warning shadow-card backdrop-blur">
+            有 {mapV2UnmappedSegments.length} 個推薦片段無法自動定位，已保留在推薦清單供手動確認。
           </div>
         )}
+
+        <div className="pointer-events-none absolute bottom-3 right-3 top-14 z-30 flex flex-row-reverse items-stretch gap-2">
+          <div className="pointer-events-auto flex w-11 shrink-0 flex-col justify-center gap-2 py-1">
+            <button
+              type="button"
+              className={cn(
+                "flex min-h-[4.5rem] w-full flex-col items-center justify-center gap-1 rounded-2xl border border-border/70 bg-surface/80 px-1 py-2 shadow-modal backdrop-blur transition-colors",
+                mapRightDrawer === "itinerary"
+                  ? "ring-1 ring-primary/35"
+                  : "hover:bg-surface-muted/80"
+              )}
+              aria-pressed={mapRightDrawer === "itinerary"}
+              onClick={() => setMapRightDrawer((d) => (d === "itinerary" ? null : "itinerary"))}
+            >
+              <MapIcon size={18} className="shrink-0 text-primary" />
+              <span className="text-center text-[10px] font-semibold leading-tight text-primary">行程規劃</span>
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "flex min-h-[4.5rem] w-full flex-col items-center justify-center gap-1 rounded-2xl border border-border/70 bg-surface/80 px-1 py-2 shadow-modal backdrop-blur transition-colors",
+                mapRightDrawer === "videos"
+                  ? "ring-1 ring-primary/35"
+                  : "hover:bg-surface-muted/80"
+              )}
+              aria-pressed={mapRightDrawer === "videos"}
+              onClick={() => setMapRightDrawer((d) => (d === "videos" ? null : "videos"))}
+            >
+              <Film size={18} className="shrink-0 text-primary" />
+              <span className="text-center text-[10px] font-semibold leading-tight text-primary">推薦影片</span>
+            </button>
+          </div>
+
+          <div
+            className={cn(
+              "pointer-events-auto flex h-full min-h-0 w-[min(430px,calc(100vw-4.5rem))] max-w-[92%] flex-col overflow-hidden rounded-2xl border border-border/70 bg-surface/80 shadow-modal backdrop-blur transition-transform duration-300 ease-out",
+              mapRightDrawer ? "translate-x-0" : "pointer-events-none translate-x-[calc(100%+0.75rem)]"
+            )}
+          >
+            {mapRightDrawer === "itinerary" && (
+              <>
+                <div className="flex shrink-0 items-center justify-between border-b border-border/70 px-3 py-2">
+                  <p className="text-xs font-semibold text-primary">行程規劃</p>
+                  <button
+                    type="button"
+                    className="rounded-btn border border-border px-2 py-1 text-[11px] text-muted hover:bg-surface-muted"
+                    onClick={() => setMapRightDrawer(null)}
+                  >
+                    關閉
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  {renderTripPanelColumn()}
+                </div>
+              </>
+            )}
+            {mapRightDrawer === "videos" && (
+              <>
+                <div className="flex shrink-0 items-center justify-between border-b border-border/70 px-3 py-2">
+                  <p className="text-xs font-semibold text-primary">影片推薦（{recommendedVideos.length}）</p>
+                  <button
+                    type="button"
+                    className="rounded-btn border border-border px-2 py-1 text-[11px] text-muted hover:bg-surface-muted"
+                    onClick={() => setMapRightDrawer(null)}
+                  >
+                    關閉
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                  {recommendedVideos.length === 0 ? (
+                    <p className="text-xs text-muted">尚未有可播放影片，請先用語音描述旅遊需求。</p>
+                  ) : (
+                    <div className="flex snap-x snap-mandatory gap-2 overflow-x-auto pb-1">
+                      {recommendedVideos.map((video) => {
+                        const thumb =
+                          video.thumbnail_url ||
+                          (video.youtube_id ? `https://i.ytimg.com/vi/${video.youtube_id}/mqdefault.jpg` : "");
+                        const first = (video.segments || [])[0];
+                        return (
+                          <button
+                            key={`${video.youtube_id}-${video.video_id}`}
+                            type="button"
+                            className="w-[196px] shrink-0 snap-start overflow-hidden rounded-xl border border-border bg-surface text-left hover:shadow-card-hover"
+                            onClick={() => {
+                              setPlayerStartSec(first?.start_sec ?? 0);
+                              setPlayerVideo(video);
+                            }}
+                          >
+                            {thumb ? (
+                              <Image
+                                src={thumb}
+                                alt={video.title}
+                                width={320}
+                                height={180}
+                                className="h-24 w-full object-cover"
+                              />
+                            ) : (
+                              <div className="flex h-24 w-full items-center justify-center bg-surface-muted text-xs text-muted">
+                                No thumbnail
+                              </div>
+                            )}
+                            <div className="p-2">
+                              <p className="line-clamp-2 text-xs font-medium text-primary">{video.title}</p>
+                              {first && (
+                                <p className="mt-1 text-[11px] text-muted">
+                                  {formatSeconds(first.start_sec)} - {formatSeconds(first.end_sec)}
+                                </p>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
     );
   }
@@ -3612,115 +4288,87 @@ function HomePageInner() {
       />
 
       {/* Main content area - Three column Mindtrip layout */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Center column: Chat / Search / Saved + Map */}
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Top Bar */}
-          <TopBar
-            tripName={state.days[0]?.label ? `Trip ${state.days.length} days` : undefined}
-            destination={undefined}
-            dates={state.days[0]?.label}
-            travelers={undefined}
-            budget={state.totalBudget > 0 ? `$${state.totalBudget}` : undefined}
-            onInvite={() => void copyShareLink()}
-            onCreateTrip={() => void saveItineraryToServer()}
-            onEditDestination={() => { setChatInput("I want to change the destination to "); }}
-            onEditDates={openDateEditModal}
-            onEditTravelers={() => { setChatInput("Change the number of travelers to "); }}
-            onEditBudget={() => { setChatInput("Set the budget to "); }}
-          />
-
-          {/* Content area: primary left + optional secondary right；Search 時顯示地圖欄 */}
-          <div ref={centerSplitContainerRef} className="flex flex-1 min-h-0 overflow-hidden">
-            <div
-              className={
-                splitActive
-                  ? "flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-border"
-                  : "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-r border-border"
-              }
-              style={splitActive ? { width: `${splitRatio * 100}%`, flexShrink: 0 } : undefined}
-            >
-              <div className="border-b border-border px-4 pt-3">
-                <Tabs
-                  items={contentTabItems}
-                  activeId={primaryTab}
-                  activeIds={secondaryTab ? [primaryTab, secondaryTab] : undefined}
-                  onChange={(id) => handleContentTabChange(id as ContentTab)}
-                />
-              </div>
-
-              {primaryTab === "chat" && (
-                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                <ChatPanel
-                  messages={chatMessages}
-                  chatInput={chatInput}
-                  onChatInputChange={(v) => setChatInput(v)}
-                  onSubmit={onSubmitChat}
-                  chatLoading={chatLoading}
-                  chatError={chatError}
-                  chatDegraded={chatDegraded}
-                  toolCallSummaries={toolCallSummaries}
-                  speechSupported={speechSupported}
-                  isRecording={isRecording}
-                  onStartRecording={startVoiceInput}
-                  onStopRecording={stopVoiceInput}
-                  modelOptions={modelOptions}
-                  selectedModel={selectedModel}
-                  onModelChange={(v) => setSelectedModel(v)}
-                  modelsLoading={modelsLoading}
-                  recommendedVideos={recommendedVideos}
-                  onPlayVideo={(video, startSec) => {
-                    setPlayerStartSec(startSec ?? 0);
-                    setPlayerVideo(video);
-                  }}
-                  onLikeVideo={(video, liked) => {
-                    void trackRecommendationEvent(liked ? "like" : "unlike", video);
-                  }}
-                  onLoadMore={loadMoreRecommendations}
-                  lastRecommendationQuery={lastRecommendationQuery}
-                  onQuickReplyClick={handleQuickReplyClick}
-                />
-                </div>
-              )}
-
-              {primaryTab === "search" && (secondaryTab === null || secondaryTab === "itinerary") && renderSearchPanel()}
-
-              {primaryTab === "saved" && secondaryTab === null && renderSavedPanel()}
-
-              {primaryTab === "itinerary" && (secondaryTab === null || secondaryTab === "search") && renderTripPanelColumn()}
-            </div>
-
-            <div
-              role="separator"
-              aria-orientation="vertical"
-              aria-hidden={!splitActive}
-              className={
-                splitActive
-                  ? "w-1 shrink-0 cursor-col-resize border-l border-r border-border bg-border hover:bg-primary/40"
-                  : "hidden"
-              }
-              onMouseDown={splitActive ? handleSplitMouseDown : undefined}
+          {activePanel !== null && (
+            <TopBar
+              tripName={state.days[0]?.label ? `Trip ${state.days.length} days` : undefined}
+              destination={undefined}
+              dates={state.days[0]?.label}
+              travelers={undefined}
+              budget={state.totalBudget > 0 ? `$${state.totalBudget}` : undefined}
+              onInvite={() => void copyShareLink()}
+              onCreateTrip={() => void saveItineraryToServer()}
+              onEditDestination={() => { setChatInput("I want to change the destination to "); }}
+              onEditDates={openDateEditModal}
+              onEditTravelers={() => { setChatInput("Change the number of travelers to "); }}
+              onEditBudget={() => { setChatInput("Set the budget to "); }}
             />
+          )}
 
-            {showRightColumn && (
-              <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                {secondaryTab === null && primaryTab === "search" && renderMapColumn()}
-
-                {secondaryTab === "search" && (
-                  <div className="flex min-h-0 flex-1 flex-row">
-                    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-r border-border">
-                      {renderSearchPanel()}
-                    </div>
-                    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                      {renderMapColumn()}
-                    </div>
-                  </div>
-                )}
-
-                {secondaryTab === "saved" && renderSavedPanel()}
-
-                {secondaryTab === "itinerary" && renderTripPanelColumn()}
+          <div className="flex flex-1 min-h-0 flex-row overflow-hidden">
+            {activePanel === null ? (
+              <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                {renderMapColumn()}
               </div>
+            ) : (
+              <>
+                <div className="flex min-h-0 min-w-0 flex-[1_1_50%] flex-col overflow-hidden border-r border-border">
+                  <div className="border-b border-border px-4 pt-3">
+                    <Tabs
+                      items={contentTabItems}
+                      activeId={activePanel}
+                      onChange={(id) => handleContentTabChange(id as ContentTab)}
+                    />
+                  </div>
+
+                  {activePanel === "chat" && (
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                      <ChatPanel
+                        messages={chatMessages}
+                        chatInput={chatInput}
+                        onChatInputChange={(v) => setChatInput(v)}
+                        onSubmit={onSubmitChat}
+                        chatLoading={chatLoading}
+                        chatError={chatError}
+                        chatDegraded={chatDegraded}
+                        toolCallSummaries={toolCallSummaries}
+                        speechSupported={speechSupported}
+                        isRecording={isRecording && recordingSource === "chat"}
+                        onStartRecording={startVoiceInput}
+                        onStopRecording={stopVoiceInput}
+                        modelOptions={modelOptions}
+                        selectedModel={selectedModel}
+                        onModelChange={(v) => setSelectedModel(v)}
+                        modelsLoading={modelsLoading}
+                        recommendedVideos={recommendedVideos}
+                        onPlayVideo={(video, startSec) => {
+                          setPlayerStartSec(startSec ?? 0);
+                          setPlayerVideo(video);
+                        }}
+                        onLikeVideo={(video, liked) => {
+                          void trackRecommendationEvent(liked ? "like" : "unlike", video);
+                        }}
+                        onLoadMore={loadMoreRecommendations}
+                        lastRecommendationQuery={lastRecommendationQuery}
+                        onQuickReplyClick={handleQuickReplyClick}
+                      />
+                    </div>
+                  )}
+
+                  {activePanel === "search" && renderSearchPanel()}
+
+                  {activePanel === "saved" && renderSavedPanel()}
+
+                  {activePanel === "itinerary" && renderTripPanelColumn()}
+                </div>
+
+                <div className="flex min-h-0 min-w-0 flex-[1_1_50%] flex-col overflow-hidden">
+                  {renderMapColumn()}
+                </div>
+              </>
             )}
           </div>
 

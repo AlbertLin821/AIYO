@@ -567,12 +567,17 @@ export function VideoPlayerModal({
                     <button
                       key={seg.id}
                       type="button"
-                      onClick={() => onJumpToTime(seg.start_sec)}
+                      onClick={() => {
+                        onJumpToTime(seg.start_sec);
+                        if (seg.city) {
+                          onFocusPlaceByName?.(seg.city);
+                        }
+                      }}
                       className="segment-card"
                     >
                       <div className="segment-card-row">
                         <span className="segment-time-badge">
-                          {formatSeconds(seg.start_sec)} - {formatSeconds(seg.end_sec)}
+                          {formatSeconds(seg.start_sec)} ~ {formatSeconds(seg.end_sec)}
                         </span>
                         {seg.city &&
                           (onFocusPlaceByName ? (

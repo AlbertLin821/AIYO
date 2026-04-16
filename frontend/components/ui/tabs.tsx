@@ -24,6 +24,9 @@ function isTabActive(id: string, activeId: string, activeIds: string[] | undefin
   if (activeIds && activeIds.length > 0) {
     return activeIds.includes(id);
   }
+  if (!activeId) {
+    return false;
+  }
   return activeId === id;
 }
 

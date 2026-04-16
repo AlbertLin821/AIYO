@@ -1,6 +1,15 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  async redirects() {
+    if (String(process.env.NEXT_PUBLIC_PHASE_C_READONLY || "false").toLowerCase() !== "true") {
+      return [];
+    }
+    return [
+      { source: "/", destination: "/v2", permanent: false },
+      { source: "/home", destination: "/legacy", permanent: false }
+    ];
+  },
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "i.ytimg.com", pathname: "/**" },

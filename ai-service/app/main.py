@@ -49,6 +49,7 @@ from app.planner import (
     plan_itinerary_v2,
     planner_result_to_response,
 )
+from app.v2_router import router as v2_router
 
 
 class ChatMessage(BaseModel):
@@ -480,6 +481,7 @@ if SENTRY_DSN:
     )
 
 Instrumentator().instrument(app).expose(app, include_in_schema=False, endpoint="/metrics")
+app.include_router(v2_router)
 
 
 def require_internal_caller(request: Request, x_internal_token: Optional[str] = Header(default=None)) -> None:
